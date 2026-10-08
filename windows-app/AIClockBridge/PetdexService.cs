@@ -1,8 +1,5 @@
 using System.Text.Json;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.Formats.Gif;
-using SixLabors.ImageSharp.PixelFormats;
-using SixLabors.ImageSharp.Processing;
+using ImageMagick;
 
 namespace AIClockBridge;
 
@@ -12,7 +9,7 @@ namespace AIClockBridge;
 // row/frame-count table below mirrors petdex's own pet-states definition).
 // We crop a row, composite the frames onto black at the device slot size,
 // encode a looping GIF, and POST it to the clock, which re-decodes it
-// on-device into its own format. ImageSharp does the WebP decode + GIF
+// on-device into its own format. Magick.NET does the WebP decode + GIF
 // encode (System.Drawing can do neither).
 
 record PetdexPet(string Slug, string DisplayName, string Kind, string SpritesheetUrl);
@@ -80,7 +77,7 @@ static class PetdexService
         }
     }
 
-    public static async Task<Image<Rgba32>> DownloadSpritesheet(PetdexPet pet)
+    public static async Task<MagickImage> DownloadSpritesheet(PetdexPet pet)
     {
         byte[] data;
         try
@@ -93,7 +90,7 @@ static class PetdexService
         }
         try
         {
-            return SixLabors.ImageSharp.Image.Load<Rgba32>(data);
+            return new MagickImage(data);
         }
         catch (Exception)
         {
@@ -105,11 +102,14 @@ static class PetdexService
     /// targetW x targetH: frames aspect-fit, composited onto black (matches
     /// the clock's black background and avoids GIF transparency compositing
     /// surprises in the on-device decoder).
-    public static byte[] BuildGif(Image<Rgba32> sheet, PetdexAnimState state,
+    public static byte[] BuildGif(MagickImage sheet, PetdexAnimState state,
                                   int targetW, int targetH)
     {
         var frameCount = Math.Min(state.Frames, MaxFrames);
-        if (frameCount <= 0) return null;
+        // 拒絕超出圖集的列，避免原生裁切回傳空白幀。
+        if (frameCount <= 0 || state.Row < 0 || state.Row >= 9 ||
+            sheet.Width != FrameW * 8 || sheet.Height != FrameH * 9 ||
+            targetW <= 0 || targetH <= 0) return null;
         // GIF delays are centiseconds; floor at 5cs like the Mac app's 0.05s
         var delayCs = Math.Max(5, state.DurationMs / state.Frames / 10);
 
@@ -122,26 +122,25 @@ static class PetdexService
 
         try
         {
-            using var gif = new Image<Rgba32>(targetW, targetH);
-            gif.Metadata.GetGifMetadata().RepeatCount = 0; // loop forever
-
+            // 每一幀持有獨立影像，集合負責釋放；黑底合成後不保留透明色。
+            using var gif = new MagickImageCollection();
             for (int i = 0; i < frameCount; i++)
             {
-                var crop = new SixLabors.ImageSharp.Rectangle(
-                    i * FrameW, state.Row * FrameH, FrameW, FrameH);
-                using var scaled = sheet.Clone(ctx => ctx.Crop(crop).Resize(drawW, drawH));
-                using var frame = new Image<Rgba32>(targetW, targetH,
-                    SixLabors.ImageSharp.Color.Black);
-                frame.Mutate(ctx => ctx.DrawImage(scaled,
-                    new SixLabors.ImageSharp.Point(drawX, drawY), 1f));
-                frame.Frames.RootFrame.Metadata.GetGifMetadata().FrameDelay = delayCs;
-                gif.Frames.AddFrame(frame.Frames.RootFrame);
+                using var scaled = sheet.Clone();
+                scaled.Crop(new MagickGeometry(i * FrameW, state.Row * FrameH,
+                    (uint)FrameW, (uint)FrameH));
+                scaled.ResetPage();
+                scaled.Resize((uint)drawW, (uint)drawH);
+                var frame = new MagickImage(MagickColors.Black, (uint)targetW, (uint)targetH);
+                gif.Add(frame);
+                frame.Composite(scaled, drawX, drawY, CompositeOperator.Over);
+                frame.Alpha(AlphaOption.Off);
+                frame.AnimationDelay = (uint)delayCs;
+                frame.AnimationTicksPerSecond = 100;
+                frame.AnimationIterations = 0;
+                frame.GifDisposeMethod = GifDisposeMethod.Background;
             }
-            gif.Frames.RemoveFrame(0); // drop the blank canvas frame
-
-            using var ms = new MemoryStream();
-            gif.SaveAsGif(ms);
-            return ms.ToArray();
+            return gif.ToByteArray(MagickFormat.Gif);
         }
         catch (Exception)
         {

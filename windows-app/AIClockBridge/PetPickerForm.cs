@@ -1,5 +1,5 @@
 using System.Drawing;
-using SixLabors.ImageSharp.PixelFormats;
+using ImageMagick;
 
 namespace AIClockBridge;
 
@@ -29,8 +29,31 @@ sealed class PetPickerForm : Form
 
     List<PetdexPet> _allPets = new();
     List<PetdexPet> _filtered = new();
-    (string Slug, SixLabors.ImageSharp.Image<Rgba32> Image)? _sheetCache;
+    (string Slug, MagickImage Image)? _sheetCache;
     int _previewToken;
+    MemoryStream _previewStream;
+
+    // 圖片依賴串流存活；先從 PictureBox 卸除，再依序釋放兩者。
+    void ClearPreview()
+    {
+        var old = _preview.Image;
+        _preview.Image = null;
+        old?.Dispose();
+        _previewStream?.Dispose();
+        _previewStream = null;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            ++_previewToken;
+            ClearPreview();
+            _sheetCache?.Image.Dispose();
+            _sheetCache = null;
+        }
+        base.Dispose(disposing);
+    }
 
     PetPickerForm()
     {
@@ -102,12 +125,14 @@ sealed class PetPickerForm : Form
         try
         {
             var pets = await PetdexService.LoadManifest();
+            if (IsDisposed) return;
             _allPets = pets.OrderBy(p => p.DisplayName, StringComparer.OrdinalIgnoreCase).ToList();
             ApplyFilter();
             _statusLabel.Text = $"共 {pets.Count} 个桌宠，选择后可预览";
         }
         catch (Exception e)
         {
+            if (IsDisposed) return;
             _statusLabel.Text = $"加载失败：{e.Message}";
         }
     }
@@ -149,12 +174,13 @@ sealed class PetPickerForm : Form
 
     async void PreviewSelectionChanged()
     {
-        var pet = SelectedPet;
-        if (pet == null) return;
-        _uploadButton.Enabled = false;
         var token = ++_previewToken;
+        _uploadButton.Enabled = false;
+        ClearPreview();
+        var pet = SelectedPet;
+        if (pet == null || IsDisposed) return;
 
-        SixLabors.ImageSharp.Image<Rgba32> sheet;
+        MagickImage sheet;
         if (_sheetCache?.Slug == pet.Slug)
         {
             sheet = _sheetCache.Value.Image;
@@ -182,13 +208,26 @@ sealed class PetPickerForm : Form
 
         var s = SlotSize;
         var state = SelectedState;
-        var gif = await Task.Run(() => PetdexService.BuildGif(sheet, state, s.W, s.H));
+        // 在 UI 執行緒複製後才排入背景工作，切換角色可安全釋放快取。
+        using var ownedSheet = new MagickImage(sheet);
+        var gif = await Task.Run(() => PetdexService.BuildGif(ownedSheet, state, s.W, s.H));
         if (_previewToken != token) return;
         if (gif != null)
         {
-            var old = _preview.Image;
-            _preview.Image = System.Drawing.Image.FromStream(new MemoryStream(gif));
-            old?.Dispose();
+            var stream = new MemoryStream(gif);
+            try
+            {
+                var image = System.Drawing.Image.FromStream(stream);
+                ClearPreview();
+                _previewStream = stream;
+                _preview.Image = image;
+            }
+            catch
+            {
+                stream.Dispose();
+                _statusLabel.Text = "GIF 預覽失敗";
+                return;
+            }
             _uploadButton.Enabled = true;
             _statusLabel.Text = $"{pet.DisplayName} · {state.Label} → {s.Slot}";
         }
@@ -202,10 +241,15 @@ sealed class PetPickerForm : Form
     {
         var pet = SelectedPet;
         if (_sheetCache == null || pet == null || _sheetCache.Value.Slug != pet.Slug) return;
+        var token = _previewToken;
+        _uploadButton.Enabled = false;
         var s = SlotSize;
         var state = SelectedState;
         var sheet = _sheetCache.Value.Image;
-        var gif = await Task.Run(() => PetdexService.BuildGif(sheet, state, s.W, s.H));
+        // 在 UI 執行緒複製後才排入背景工作，切換角色可安全釋放快取。
+        using var ownedSheet = new MagickImage(sheet);
+        var gif = await Task.Run(() => PetdexService.BuildGif(ownedSheet, state, s.W, s.H));
+        if (_previewToken != token || IsDisposed) return;
         if (gif == null)
         {
             _statusLabel.Text = "GIF 生成失败";
@@ -216,16 +260,18 @@ sealed class PetPickerForm : Form
         try
         {
             await DeviceClient.UploadGif(gif, s.Slot);
+            if (_previewToken != token || IsDisposed) return;
             _statusLabel.Text =
                 $"✅ 已应用：{pet.DisplayName} 现在是 {(s.Slot == "claude" ? "Claude" : "Codex")} 的桌宠";
         }
         catch (Exception e)
         {
+            if (_previewToken != token || IsDisposed) return;
             _statusLabel.Text = $"上传失败：{e.Message}";
         }
         finally
         {
-            _uploadButton.Enabled = true;
+            if (_previewToken == token && !IsDisposed) _uploadButton.Enabled = true;
         }
     }
 }

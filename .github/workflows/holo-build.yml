@@ -39,6 +39,29 @@ jobs:
       - run: dotnet build windows-app/AIClockBridge/AIClockBridge.csproj -c Release
       - run: dotnet run --project windows-app/HoloAi.Tests/HoloAi.Tests.csproj -c Release -- previews
       - run: dotnet run --project windows-app/PcMonitor.Tests/PcMonitor.Tests.csproj -c Release -- previews
+      - run: dotnet run --project windows-app/Petdex.Tests/Petdex.Tests.csproj -c Release
+      - name: Audit direct and transitive NuGet dependencies
+        shell: pwsh
+        run: |
+          $report = dotnet list windows-app/AIClockBridge/AIClockBridge.csproj package --vulnerable --include-transitive --format json
+          if ($LASTEXITCODE -ne 0) { throw "NuGet audit failed" }
+          $report | Set-Content nuget-audit.json
+          $audit = $report | ConvertFrom-Json
+          if (@($audit.logs | Where-Object level -eq 'error').Count) { throw "Incomplete audit" }
+          foreach ($project in $audit.projects) {
+            foreach ($framework in $project.frameworks) {
+              if (@($framework.topLevelPackages).Count -or @($framework.transitivePackages).Count) {
+                throw "Known vulnerable dependency"
+              }
+            }
+          }
+      - name: Publish portable Windows app
+        run: dotnet publish windows-app/AIClockBridge/AIClockBridge.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o dist/windows
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-portable
+          path: dist/windows/
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: holo-render-previews
