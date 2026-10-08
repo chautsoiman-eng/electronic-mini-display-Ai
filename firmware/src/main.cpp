@@ -73,13 +73,15 @@ unsigned long lastSwitchMs = 0;
 // Display override, settable from the Mac app via POST /api/display:
 // auto = follow working status, claude/codex = pin that app on screen,
 // net/music = show Mac-side telemetry pages instead of the pet.
-enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_NET, MODE_MUSIC, MODE_STOCK };
+enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_NET, MODE_MUSIC, MODE_STOCK, MODE_HOLO_AI };
 DisplayMode displayMode = MODE_AUTO;
 
 // When AUTO and the Mac reports audio playing, the screen auto-switches to the
 // music page and back when it stops — same spirit as the Claude/Codex auto
 // switch. Only AUTO does this; a pinned mode is always honored as-is.
 bool statusMusicPlaying = false;
+unsigned long lastHoloDrawMs = 0;
+bool holoDirty = true;
 DisplayMode lastEffectiveMode = MODE_AUTO;
 
 // ---------- net speed mode state ----------
@@ -1565,7 +1567,9 @@ void pollBridge() {
   }
   http.end();
   DisplayMode eff = effectiveMode();
-  if (eff != MODE_NET && eff != MODE_MUSIC && eff != MODE_STOCK) {
+  if (eff == MODE_HOLO_AI) { holoDirty = true; drawHoloAi(); }
+  else if (eff == MODE_HOLO_AI) { holoDirty = true; drawHoloAi(); }
+      else if (eff != MODE_NET && eff != MODE_MUSIC && eff != MODE_STOCK) {
     // Only a real app switch clears the screen; a plain data refresh paints
     // in place so the poll doesn't flash the whole display.
     if (updateActiveApp()) drawActiveApp();
@@ -1589,6 +1593,74 @@ size_t serialLineLen = 0;
 bool wiredActive() { return wiredEverLinked && (millis() - lastSerialFrameMs) < 15000UL; }
 
 // First data over either transport replaces the boot/portal screen.
+
+static uint16_t holoColor(float pct) {
+  if (pct < 0) return TFT_DARKGREY;
+  if (pct >= 90) return TFT_RED;
+  if (pct >= 70) return TFT_ORANGE;
+  return tft.color565(88, 220, 222);
+}
+static void holoText(const String &s, int x, int y, uint16_t color, int font=2) {
+  tft.setTextColor(color, TFT_BLACK);
+  tft.drawString(s, x, y, font);
+}
+static String holoReset(int minutes) {
+  if (minutes < 0) return "--";
+  if (minutes >= 1440) return String(minutes / 1440) + "d " + String((minutes % 1440) / 60) + "h";
+  if (minutes >= 60) return String(minutes / 60) + "h " + String(minutes % 60) + "m";
+  return String(minutes) + "m";
+}
+static void holoBar(int y, const char *label, float pct, int resetMinutes) {
+  const uint16_t muted = tft.color565(113, 151, 164);
+  holoText(label, 14, y, muted);
+  String val = pct < 0 ? "--" : String((int)(constrain(pct, 0.0f, 100.0f) + 0.5f)) + "%";
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(val, 226, y, 2);
+  tft.setTextDatum(TL_DATUM);
+  tft.fillRoundRect(14, y + 18, 212, 6, 3, tft.color565(21, 48, 57));
+  if (pct >= 0) {
+    int width = (int)(212.0f * constrain(pct, 0.0f, 100.0f) / 100.0f);
+    if (width > 0) tft.fillRoundRect(14, y + 18, width, 6, 3, holoColor(pct));
+  }
+  holoText("RESET " + holoReset(resetMinutes), 14, y + 27, muted, 1);
+}
+void drawHoloAi() {
+  tft.fillScreen(TFT_BLACK);
+  const uint16_t cyan = tft.color565(88, 220, 222);
+  const uint16_t muted = tft.color565(113, 151, 164);
+  holoText("HOLO / AI MONITOR", 14, 8, cyan, 2);
+  tft.drawFastHLine(14, 29, 212, tft.color565(24, 71, 82));
+  holoText("CLAUDE", 14, 36, TFT_WHITE, 2);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(cyan, TFT_BLACK);
+  tft.drawString(claudeStatus.needsInput ? "INPUT" : claudeStatus.status, 226, 36, 2);
+  tft.setTextDatum(TL_DATUM);
+  holoBar(57, "5H", claudeStatus.fiveHourPct, claudeStatus.fiveHourResetMin);
+  holoBar(99, "7D", claudeStatus.sevenDayPct, claudeStatus.sevenDayResetMin);
+  tft.drawFastHLine(14, 138, 212, tft.color565(24, 71, 82));
+  holoText("CODEX", 14, 145, TFT_WHITE, 2);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(cyan, TFT_BLACK);
+  tft.drawString(codexStatus.needsInput ? "INPUT" : codexStatus.status, 226, 145, 2);
+  tft.setTextDatum(TL_DATUM);
+  // Compact rows fit both providers within the native 240px panel.
+  holoBar(165, "5H", codexStatus.primaryPct, codexStatus.primaryResetMin);
+  // Last row uses a reduced layout so it remains fully visible.
+  holoText("7D", 14, 207, muted, 2);
+  String pct = codexStatus.weeklyPct < 0 ? "--" : String((int)(constrain(codexStatus.weeklyPct, 0.0f, 100.0f) + 0.5f)) + "%";
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(pct, 226, 207, 2);
+  tft.setTextDatum(TL_DATUM);
+  tft.fillRoundRect(14, 226, 212, 5, 2, tft.color565(21, 48, 57));
+  if (codexStatus.weeklyPct >= 0) {
+    int width = (int)(212.0f * constrain(codexStatus.weeklyPct, 0.0f, 100.0f) / 100.0f);
+    if (width > 0) tft.fillRoundRect(14, 226, width, 5, 2, holoColor(codexStatus.weeklyPct));
+  }
+  holoDirty = false;
+}
+
 void showMainUiIfNeeded() {
   if (mainUiShown) return;
   mainUiShown = true;
@@ -1642,6 +1714,7 @@ void handleSerialFrame(char *line) {
       else if (m == "net") displayMode = MODE_NET;
       else if (m == "music") displayMode = MODE_MUSIC;
       else if (m == "stock") displayMode = MODE_STOCK;
+      else if (m == "holo_ai") displayMode = MODE_HOLO_AI;
       // the effectiveMode transition handler in loop() repaints the chrome
     }
     return;
@@ -1765,6 +1838,7 @@ const char *displayModeName(DisplayMode m) {
   if (m == MODE_NET) return "net";
   if (m == MODE_MUSIC) return "music";
   if (m == MODE_STOCK) return "stock";
+  if (m == MODE_HOLO_AI) return "holo_ai";
   return "auto";
 }
 
@@ -1805,12 +1879,16 @@ void handleApiDisplay() {
   else if (mode == "net") displayMode = MODE_NET;
   else if (mode == "music") displayMode = MODE_MUSIC;
   else if (mode == "stock") displayMode = MODE_STOCK;
+  else if (mode == "holo_ai") displayMode = MODE_HOLO_AI;
   else {
-    webServer.send(400, "text/plain", "mode must be auto|claude|codex|net|music|stock");
+    webServer.send(400, "text/plain", "mode must be auto|claude|codex|net|music|stock|holo_ai");
     return;
   }
   Serial.printf("[api] display mode = %s\n", mode.c_str());
-  if (displayMode == MODE_NET) {
+  if (displayMode == MODE_HOLO_AI) {
+    holoDirty = true;
+    drawHoloAi();
+  } else if (displayMode == MODE_NET) {
     netChromeDrawn = false;
     lastNetPollMs = 0; // poll + draw on the next loop tick
   } else if (displayMode == MODE_MUSIC) {
@@ -2215,7 +2293,10 @@ void loop() {
   DisplayMode eff = effectiveMode();
   if (eff != lastEffectiveMode) {
     lastEffectiveMode = eff;
-    if (eff == MODE_NET) {
+    if (eff == MODE_HOLO_AI) {
+      holoDirty = true;
+      drawHoloAi();
+    } else if (eff == MODE_NET) {
       netChromeDrawn = false;
       lastNetPollMs = 0;
     } else if (eff == MODE_MUSIC) {
@@ -2230,7 +2311,12 @@ void loop() {
     }
   }
 
-  if (eff == MODE_NET) {
+  if (eff == MODE_HOLO_AI) {
+    if (holoDirty || nowMs - lastHoloDrawMs >= 30000UL) {
+      lastHoloDrawMs = nowMs;
+      drawHoloAi();
+    }
+  } else if (eff == MODE_NET) {
     // net-speed mode: rendering (constant-rate sweep) is independent of the
     // bridge polls that refill its sample queue
     if (nowMs - lastNetDrawMs >= NET_DRAW_INTERVAL_MS) {
