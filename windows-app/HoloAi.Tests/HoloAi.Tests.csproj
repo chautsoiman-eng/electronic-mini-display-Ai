@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- 直接測試正式繪圖程式，不啟動帳號用量服務或連接裝置。 -->
+    <Compile Include="../AIClockBridge/HoloAiScene.cs" Link="HoloAiScene.cs" />
+  </ItemGroup>
+</Project>

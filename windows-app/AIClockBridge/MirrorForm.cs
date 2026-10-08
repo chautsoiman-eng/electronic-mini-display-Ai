@@ -44,6 +44,8 @@ sealed class MirrorControl : Control
     public StockMonitor.Row[] StockRows = Array.Empty<StockMonitor.Row>();
 
     public bool MusicMode;
+    public bool HoloMode;
+    public HoloProvider HoloClaude, HoloCodex;
     public string MusicTitle = "";
     public string MusicArtist = "";
     public double MusicElapsed;
@@ -107,6 +109,11 @@ sealed class MirrorControl : Control
             g.SetClip(panel);
         }
 
+        if (HoloMode)
+        {
+            HoloAiScene.Draw(g, HoloClaude, HoloCodex, DeviceOK);
+            return;
+        }
         if (NetMode)
         {
             DrawNetScene(g);
@@ -388,8 +395,8 @@ sealed class MirrorForm : Form
     readonly StockMonitor _stockMonitor;
     readonly MirrorControl _mirror = new();
     readonly RadioButton[] _modeButtons;
-    static readonly string[] Modes = { "auto", "claude", "codex", "net", "music", "stock" };
-    static readonly string[] ModeLabels = { "自动", "Claude", "Codex", "网速", "音乐", "股票" };
+    static readonly string[] Modes = { "auto", "claude", "codex", "net", "music", "stock", "holo_ai" };
+    static readonly string[] ModeLabels = { "自动", "Claude", "Codex", "网速", "音乐", "股票", "Holo AI" };
     readonly Label _statusLabel = new();
     readonly TrackBar _brightness = new() { Minimum = 0, Maximum = 100, TickStyle = TickStyle.None };
     readonly Label _brightnessValue = new();
@@ -425,13 +432,14 @@ sealed class MirrorForm : Form
         BackColor = SystemColors.Control;
         Padding = new Padding(1);
 
-        ClientSize = new Size(Px(316), Px(424));
+        ClientSize = new Size(Px(316), Px(456));
 
         _mirror.SetBounds(Px(14), Px(14), Px(288), Px(288));
         Controls.Add(_mirror);
 
         _modeButtons = new RadioButton[Modes.Length];
-        var segWidth = Px(288) / Modes.Length;
+        // 分成兩列，保留標籤寬度，避免新增模式後所有按鈕都過窄。
+        var segWidth = Px(288) / 4;
         for (int i = 0; i < Modes.Length; i++)
         {
             var btn = new RadioButton
@@ -442,7 +450,7 @@ sealed class MirrorForm : Form
                 Tag = Modes[i],
                 AutoSize = false,
             };
-            btn.SetBounds(Px(14) + i * segWidth, Px(312), segWidth, Px(28));
+            btn.SetBounds(Px(14) + (i % 4) * segWidth, Px(312 + (i / 4) * 30), segWidth, Px(28));
             btn.CheckedChanged += ModeChanged;
             _modeButtons[i] = btn;
             Controls.Add(btn);
@@ -454,20 +462,20 @@ sealed class MirrorForm : Form
             TextAlign = ContentAlignment.MiddleCenter,
             ForeColor = SystemColors.GrayText,
         };
-        sunLabel.SetBounds(Px(12), Px(346), Px(24), Px(26));
+        sunLabel.SetBounds(Px(12), Px(378), Px(24), Px(26));
         Controls.Add(sunLabel);
-        _brightness.SetBounds(Px(36), Px(346), Px(216), Px(26));
+        _brightness.SetBounds(Px(36), Px(378), Px(216), Px(26));
         _brightness.Scroll += (_, _) => OnBrightnessInput(final: false);
         _brightness.MouseUp += (_, _) => OnBrightnessInput(final: true);
         Controls.Add(_brightness);
-        _brightnessValue.SetBounds(Px(254), Px(346), Px(48), Px(26));
+        _brightnessValue.SetBounds(Px(254), Px(378), Px(48), Px(26));
         _brightnessValue.TextAlign = ContentAlignment.MiddleRight;
         _brightnessValue.ForeColor = SystemColors.GrayText;
         _brightnessValue.Font = new Font("Microsoft YaHei UI", 8.5f);
         _brightnessValue.Text = "100%";
         Controls.Add(_brightnessValue);
 
-        _statusLabel.SetBounds(Px(10), Px(378), Px(296), Px(36));
+        _statusLabel.SetBounds(Px(10), Px(410), Px(296), Px(36));
         _statusLabel.TextAlign = ContentAlignment.MiddleCenter;
         _statusLabel.ForeColor = SystemColors.GrayText;
         _statusLabel.Font = new Font("Microsoft YaHei UI", 8.5f);
@@ -600,6 +608,8 @@ sealed class MirrorForm : Form
         _applyingMode = false;
         var modeText = info.Mode == "auto" ? "自动切换"
             : info.Mode == "net" ? "网速曲线"
+            : info.Mode == "holo_ai" ? "Holo AI 监控"
+            : info.Mode == "stock" ? "股票行情"
             : info.Mode == "music" ? "音乐播放" : "固定显示";
         _statusLabel.Text = $"{info.Ip} · {modeText} · 数据 {info.Bridge}";
     }
@@ -613,6 +623,19 @@ sealed class MirrorForm : Form
         _mirror.NetMode = info.Effective == "net";
         _mirror.MusicMode = info.Effective == "music";
         _mirror.StockMode = info.Effective == "stock";
+        _mirror.HoloMode = info.Effective == "holo_ai";
+        if (_mirror.HoloMode)
+        {
+            var status = _service.Snapshot();
+            var c = status.Claude;
+            var x = status.Codex;
+            _mirror.HoloClaude = new(c.Status, c.NeedsInput, c.FiveHourPct, c.FiveHourResetMin,
+                c.SevenDayPct, c.SevenDayResetMin);
+            _mirror.HoloCodex = new(x.Status, x.NeedsInput, x.PrimaryPct, x.PrimaryResetMin,
+                x.WeeklyPct, x.WeeklyResetMin);
+            _mirror.Invalidate();
+            return;
+        }
         if (_mirror.StockMode)
         {
             _mirror.StockRows = _stockMonitor.Snapshot;
@@ -676,6 +699,7 @@ sealed class MirrorForm : Form
 
     void EnsureSprite(DeviceInfo info)
     {
+        if (info.Effective is "holo_ai" or "net" or "music" or "stock") return;
         var slot = info.Showing == "codex" ? "codex" : "claude";
         var w = slot == "claude" ? info.ClaudeW : info.CodexW;
         var h = slot == "claude" ? info.ClaudeH : info.CodexH;
@@ -723,7 +747,7 @@ sealed class MirrorForm : Form
 
     void AnimTick()
     {
-        if (_lastInfo == null || _mirror.NetMode) return;
+        if (_lastInfo == null || _mirror.NetMode || _mirror.HoloMode || _mirror.MusicMode || _mirror.StockMode) return;
 
         // ~400ms red-border flash while an approval is pending (device cadence)
         if (_mirror.NeedsInput)

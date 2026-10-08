@@ -1,0 +1,45 @@
+name: Holo build and render checks
+
+on:
+  push:
+    branches: [feature/holo-dashboard]
+  pull_request:
+    paths:
+      - 'firmware/**'
+      - 'windows-app/**'
+      - '.github/workflows/holo-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install platformio==6.1.19
+      - run: python -m platformio run --project-dir firmware --environment nodemcuv2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nodemcuv2-firmware
+          path: firmware/.pio/build/nodemcuv2/firmware.bin
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - run: dotnet build windows-app/AIClockBridge/AIClockBridge.csproj -c Release
+      - run: dotnet run --project windows-app/HoloAi.Tests/HoloAi.Tests.csproj -c Release -- previews
+      - uses: actions/upload-artifact@v4
+        with:
+          name: holo-render-previews
+          path: previews/*.png
+          if-no-files-found: error

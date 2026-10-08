@@ -81,6 +81,7 @@ sealed class TrayAppContext : ApplicationContext
             ("自动（谁在干活显示谁）", "auto"), ("固定 Claude", "claude"),
             ("固定 Codex", "codex"), ("网速曲线", "net"), ("音乐播放", "music"),
             ("股票行情", "stock"),
+            ("Holo AI 监控", "holo_ai"),
         })
         {
             var item = new ToolStripMenuItem(title);
@@ -207,8 +208,10 @@ sealed class TrayAppContext : ApplicationContext
             info.ClaudeCustomSprite ? "C:自定义" : "C:默认",
             info.CodexCustomSprite ? "X:自定义" : "X:默认",
         };
-        var showing = info.Mode == "net" ? "网速"
-            : info.Mode == "music" ? "音乐"
+        var showing = info.Effective == "net" ? "网速"
+            : info.Effective == "music" ? "音乐"
+            : info.Effective == "stock" ? "股票"
+            : info.Effective == "holo_ai" ? "Holo AI"
             : (info.Showing == "claude" ? "Claude" : "Codex");
         _deviceInfoItem.Text =
             $"设备：{info.Ip} · 正在显示 {showing} · {string.Join(" ", sprites)}";
