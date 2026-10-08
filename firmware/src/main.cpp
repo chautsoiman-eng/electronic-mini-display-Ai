@@ -76,6 +76,13 @@ unsigned long lastSwitchMs = 0;
 enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_NET, MODE_MUSIC, MODE_STOCK, MODE_HOLO_AI };
 DisplayMode displayMode = MODE_AUTO;
 
+DisplayMode effectiveMode();
+
+// 只有寵物模式可重畫角色；上傳／重設圖片不可覆蓋 Holo 或其他資訊頁。
+bool isPetMode(DisplayMode mode) {
+  return mode == MODE_AUTO || mode == MODE_CLAUDE || mode == MODE_CODEX;
+}
+
 // When AUTO and the Mac reports audio playing, the screen auto-switches to the
 // music page and back when it stops — same spirit as the Claude/Codex auto
 // switch. Only AUTO does this; a pinned mode is always honored as-is.
@@ -814,6 +821,7 @@ float claudeRingPct() {
 // Full clear + repaint - only for real transitions (app switch, mode return,
 // sprite change); steady-state data updates go through refreshActiveApp().
 void drawActiveApp() {
+  if (!isPetMode(effectiveMode())) return;
   tft.fillScreen(TFT_BLACK);
   ringLastPct = -1000; // screen was cleared: force the ring repaint
   showingCd = desiredCountdown();
@@ -836,6 +844,7 @@ void drawActiveApp() {
 // In-place refresh after a bridge poll: ring repaint + only the text that
 // actually changed. No fillScreen, so the 5s poll doesn't blank the screen.
 void refreshActiveApp() {
+  if (!isPetMode(effectiveMode())) return;
   if (desiredCountdown() != showingCd) { // pet <-> countdown (or 5h <-> weekly) swap
     drawActiveApp();
     return;
@@ -1533,6 +1542,17 @@ DisplayMode effectiveMode() {
   return displayMode;
 }
 
+// HTTP 與 USB 共用更新路徑；模式切換交給 loop，避免在舊頁上局部重畫。
+void refreshStatusDisplay() {
+  DisplayMode eff = effectiveMode();
+  if (eff == MODE_HOLO_AI) {
+    holoDirty = true;
+  } else if (eff == lastEffectiveMode && isPetMode(eff)) {
+    if (updateActiveApp()) drawActiveApp();
+    else refreshActiveApp();
+  }
+}
+
 void pollBridge() {
   if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) {
     Serial.printf("[bridge] skip poll: wifi=%d host='%s'\n", WiFi.status() == WL_CONNECTED, bridgeHost.c_str());
@@ -1566,15 +1586,7 @@ void pollBridge() {
     codexStatus.status = "offline";
   }
   http.end();
-  DisplayMode eff = effectiveMode();
-  if (eff == MODE_HOLO_AI) { holoDirty = true; drawHoloAi(); }
-  else if (eff == MODE_HOLO_AI) { holoDirty = true; drawHoloAi(); }
-      else if (eff != MODE_NET && eff != MODE_MUSIC && eff != MODE_STOCK) {
-    // Only a real app switch clears the screen; a plain data refresh paints
-    // in place so the poll doesn't flash the whole display.
-    if (updateActiveApp()) drawActiveApp();
-    else refreshActiveApp();
-  }
+  refreshStatusDisplay();
 }
 
 // ---------- wired (USB serial) bridge link ----------
@@ -1592,8 +1604,7 @@ size_t serialLineLen = 0;
 
 bool wiredActive() { return wiredEverLinked && (millis() - lastSerialFrameMs) < 15000UL; }
 
-// First data over either transport replaces the boot/portal screen.
-
+// ---------- Holo AI monitor ----------
 static uint16_t holoColor(float pct) {
   if (pct < 0) return TFT_DARKGREY;
   if (pct >= 90) return TFT_RED;
@@ -1627,6 +1638,8 @@ static void holoBar(int y, const char *label, float pct, int resetMinutes) {
 }
 void drawHoloAi() {
   tft.fillScreen(TFT_BLACK);
+  // 音樂／股票頁會改對齊方式；每次進入 Holo 都重設，避免標題被裁切。
+  tft.setTextDatum(TL_DATUM);
   const uint16_t cyan = tft.color565(88, 220, 222);
   const uint16_t muted = tft.color565(113, 151, 164);
   holoText("HOLO / AI MONITOR", 14, 8, cyan, 2);
@@ -1661,6 +1674,7 @@ void drawHoloAi() {
   holoDirty = false;
 }
 
+// First data over either transport replaces the boot/portal screen.
 void showMainUiIfNeeded() {
   if (mainUiShown) return;
   mainUiShown = true;
@@ -1681,11 +1695,7 @@ void handleSerialFrame(char *line) {
       lastSuccessMs = millis();
       everPolled = true;
       showMainUiIfNeeded();
-      DisplayMode eff = effectiveMode();
-      if (eff != MODE_NET && eff != MODE_MUSIC && eff != MODE_STOCK) {
-        if (updateActiveApp()) drawActiveApp();
-        else refreshActiveApp();
-      }
+      refreshStatusDisplay();
     }
     return;
   }
@@ -1885,22 +1895,7 @@ void handleApiDisplay() {
     return;
   }
   Serial.printf("[api] display mode = %s\n", mode.c_str());
-  if (displayMode == MODE_HOLO_AI) {
-    holoDirty = true;
-    drawHoloAi();
-  } else if (displayMode == MODE_NET) {
-    netChromeDrawn = false;
-    lastNetPollMs = 0; // poll + draw on the next loop tick
-  } else if (displayMode == MODE_MUSIC) {
-    musicChromeDrawn = false;
-    lastMusicPollMs = 0; // poll + draw on the next loop tick
-  } else if (displayMode == MODE_STOCK) {
-    stockChromeDrawn = false;
-    lastStockPollMs = 0; // poll + draw on the next loop tick
-  } else {
-    updateActiveApp();
-    drawActiveApp(); // unconditional: also repaints over a previous net chart
-  }
+  // 與 USB 指令一致，由 loop 依實際模式重畫；AUTO 可能仍是音樂頁。
   webServer.send(200, "text/plain", "ok");
 }
 
@@ -2295,7 +2290,6 @@ void loop() {
     lastEffectiveMode = eff;
     if (eff == MODE_HOLO_AI) {
       holoDirty = true;
-      drawHoloAi();
     } else if (eff == MODE_NET) {
       netChromeDrawn = false;
       lastNetPollMs = 0;
