@@ -73,7 +73,7 @@ unsigned long lastSwitchMs = 0;
 // Display override, settable from the Mac app via POST /api/display:
 // auto = follow working status, claude/codex = pin that app on screen,
 // net/music = show Mac-side telemetry pages instead of the pet.
-enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_NET, MODE_MUSIC, MODE_STOCK, MODE_HOLO_AI };
+enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_NET, MODE_MUSIC, MODE_STOCK, MODE_HOLO_AI, MODE_PC };
 DisplayMode displayMode = MODE_AUTO;
 
 DisplayMode effectiveMode();
@@ -1589,6 +1589,106 @@ void pollBridge() {
   refreshStatusDisplay();
 }
 
+// ---------- PC monitor ----------
+const unsigned long PC_POLL_MS = 1000;
+const unsigned long PC_STALE_MS = 5000;
+float pcCpu = -1, pcGpu = -1, pcMem = -1;
+float pcCpuTemp = -1000, pcGpuTemp = -1000;
+float pcHistory[60];
+int pcHistoryCount = 0;
+bool pcLoaded = false, pcDirty = true, pcSourceStale = true, pcLastDrawStale = true;
+bool pcSerialSeen = false;
+unsigned long pcLastRxMs = 0, pcLastSerialMs = 0, lastPcPollMs = 0;
+int64_t pcTs = -1, pcSeq = -1;
+
+// 未知／異常數值維持 sentinel，絕不畫成 0%。
+float pcNumber(JsonVariantConst value, float low, float high, float missing) {
+  if (!value.is<float>()) return missing;
+  float n = value.as<float>();
+  return isfinite(n) && n >= low && n <= high ? n : missing;
+}
+
+bool handlePcPayload(const String &payload) {
+  JsonDocument doc;
+  if (deserializeJson(doc, payload)) return false;
+  if (!doc["ts"].is<int64_t>() || !doc["seq"].is<int64_t>() ||
+      !doc["stale"].is<bool>() || !doc["cpu_history"].is<JsonArray>() ||
+      (doc["interval_ms"] | 0) != 1000) return false;
+  JsonArray history = doc["cpu_history"];
+  if (history.size() > 60) return false;
+  int64_t ts = doc["ts"].as<int64_t>(), seq = doc["seq"].as<int64_t>();
+  if (ts < 0 || seq < 0) return false;
+  // 重複快照不延長新鮮度；bridge 重啟後 ts/seq 的新組合仍可恢復。
+  if (!pcLoaded || ts != pcTs || seq != pcSeq) pcLastRxMs = millis();
+  pcTs = ts; pcSeq = seq;
+  pcCpu = pcNumber(doc["cpu_pct"], 0, 100, -1);
+  pcGpu = pcNumber(doc["gpu_pct"], 0, 100, -1);
+  pcMem = pcNumber(doc["mem_pct"], 0, 100, -1);
+  pcCpuTemp = pcNumber(doc["cpu_temp_c"], -20, 150, -1000);
+  pcGpuTemp = pcNumber(doc["gpu_temp_c"], -20, 150, -1000);
+  pcHistoryCount = history.size();
+  for (int i = 0; i < pcHistoryCount; i++) pcHistory[i] = pcNumber(history[i], 0, 100, -1);
+  pcLoaded = true;
+  pcSourceStale = doc["stale"].as<bool>();
+  pcDirty = true;
+  return true;
+}
+
+bool pcStale() { return !pcLoaded || pcSourceStale || millis() - pcLastRxMs > PC_STALE_MS; }
+
+void pollPc() {
+  if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return;
+  WiFiClient client;
+  HTTPClient http;
+  http.setTimeout(1000);
+  if (!http.begin(client, "http://" + bridgeHost + "/pc")) return;
+  int code = http.GET();
+  if (code == HTTP_CODE_OK) handlePcPayload(http.getString());
+  http.end();
+}
+
+void drawPcScreen() {
+  bool stale = pcStale();
+  pcLastDrawStale = stale;
+  pcDirty = false;
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextDatum(TL_DATUM);
+  uint16_t cyan = tft.color565(88, 220, 222), muted = tft.color565(113, 151, 164);
+  uint16_t grid = tft.color565(24, 71, 82);
+  tft.setTextColor(stale ? TFT_ORANGE : cyan, TFT_BLACK);
+  tft.drawString(stale ? "PC / DATA STALE" : "PC / MONITOR", 14, 8, 2);
+  tft.drawFastHLine(14, 29, 212, grid);
+  const char *labels[] = {"CPU", "GPU MAX", "RAM"};
+  float values[] = {pcCpu, pcGpu, pcMem};
+  for (int i = 0; i < 3; i++) {
+    int y = 38 + i * 39;
+    float pct = stale ? -1 : values[i];
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString(labels[i], 14, y, 2);
+    tft.setTextDatum(TR_DATUM);
+    tft.drawString(pct < 0 ? "--" : String((int)(pct + 0.5f)) + "%", 226, y, 2);
+    tft.fillRect(14, y + 18, 212, 6, tft.color565(21, 48, 57));
+    if (pct >= 0) tft.fillRect(14, y + 18, (int)(212 * pct / 100), 6, pct >= 90 ? TFT_ORANGE : cyan);
+  }
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(muted, TFT_BLACK);
+  tft.drawString("TEMP MAX", 14, 149, 1);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString("CPU " + (stale || pcCpuTemp < -20 ? String("--") : String((int)roundf(pcCpuTemp)) + "C"), 14, 164, 1);
+  tft.drawString("GPU " + (stale || pcGpuTemp < -20 ? String("--") : String((int)roundf(pcGpuTemp)) + "C"), 128, 164, 1);
+  for (int y = 187; y <= 221; y += 17) tft.drawFastHLine(14, y, 212, grid);
+  // 固定 60 點靠右對齊；缺失區段留白，不連成虛假的 0% 曲線。
+  for (int i = 1; i < pcHistoryCount; i++) {
+    if (pcHistory[i - 1] < 0 || pcHistory[i] < 0) continue;
+    int x = 14 + (60 - pcHistoryCount + i) * 212 / 59;
+    int previousX = 14 + (60 - pcHistoryCount + i - 1) * 212 / 59;
+    tft.drawLine(previousX, 221 - (int)(pcHistory[i - 1] * .34f), x, 221 - (int)(pcHistory[i] * .34f), cyan);
+  }
+  tft.setTextColor(muted, TFT_BLACK);
+  tft.drawString("CPU HISTORY / 60s", 14, 227, 1);
+}
+
 // ---------- wired (USB serial) bridge link ----------
 // Fallback for WiFi networks with client isolation (device can't reach the
 // bridge over LAN) - or for skipping WiFi setup entirely: when the clock is
@@ -1707,6 +1807,14 @@ void handleSerialFrame(char *line) {
     handleStockPayload(String(line + 7));
     return;
   }
+  if (!strncmp(line, "#PC ", 4)) {
+    if (handlePcPayload(String(line + 4))) {
+      pcSerialSeen = true;
+      pcLastSerialMs = millis();
+      showMainUiIfNeeded();
+    }
+    return;
+  }
   if (!strncmp(line, "#CMD ", 5)) {
     JsonDocument doc;
     if (deserializeJson(doc, line + 5)) return;
@@ -1725,6 +1833,7 @@ void handleSerialFrame(char *line) {
       else if (m == "music") displayMode = MODE_MUSIC;
       else if (m == "stock") displayMode = MODE_STOCK;
       else if (m == "holo_ai") displayMode = MODE_HOLO_AI;
+      else if (m == "pc") displayMode = MODE_PC;
       // the effectiveMode transition handler in loop() repaints the chrome
     }
     return;
@@ -1849,6 +1958,7 @@ const char *displayModeName(DisplayMode m) {
   if (m == MODE_MUSIC) return "music";
   if (m == MODE_STOCK) return "stock";
   if (m == MODE_HOLO_AI) return "holo_ai";
+  if (m == MODE_PC) return "pc";
   return "auto";
 }
 
@@ -1890,8 +2000,9 @@ void handleApiDisplay() {
   else if (mode == "music") displayMode = MODE_MUSIC;
   else if (mode == "stock") displayMode = MODE_STOCK;
   else if (mode == "holo_ai") displayMode = MODE_HOLO_AI;
+  else if (mode == "pc") displayMode = MODE_PC;
   else {
-    webServer.send(400, "text/plain", "mode must be auto|claude|codex|net|music|stock|holo_ai");
+    webServer.send(400, "text/plain", "mode must be auto|claude|codex|net|music|stock|holo_ai|pc");
     return;
   }
   Serial.printf("[api] display mode = %s\n", mode.c_str());
@@ -2288,7 +2399,10 @@ void loop() {
   DisplayMode eff = effectiveMode();
   if (eff != lastEffectiveMode) {
     lastEffectiveMode = eff;
-    if (eff == MODE_HOLO_AI) {
+    if (eff == MODE_PC) {
+      pcDirty = true;
+      lastPcPollMs = nowMs - PC_POLL_MS;
+    } else if (eff == MODE_HOLO_AI) {
       holoDirty = true;
     } else if (eff == MODE_NET) {
       netChromeDrawn = false;
@@ -2305,7 +2419,14 @@ void loop() {
     }
   }
 
-  if (eff == MODE_HOLO_AI) {
+  if (eff == MODE_PC) {
+    if (nowMs - lastPcPollMs >= PC_POLL_MS) {
+      lastPcPollMs = nowMs;
+      // 只有 #PC 能抑制 PC HTTP 輪詢；單獨 #STATUS 不應讓 PC 頁失去資料。
+      if (!pcSerialSeen || nowMs - pcLastSerialMs > PC_STALE_MS) pollPc();
+    }
+    if (pcDirty || pcLastDrawStale != pcStale()) drawPcScreen();
+  } else if (eff == MODE_HOLO_AI) {
     if (holoDirty || nowMs - lastHoloDrawMs >= 30000UL) {
       lastHoloDrawMs = nowMs;
       drawHoloAi();

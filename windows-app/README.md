@@ -23,10 +23,18 @@
 与 Mac 版的差异：
 
 - 无固件刷写入口（刷写请用网页版刷写工具）
-- 唯一的第三方依赖是 [ImageSharp](https://github.com/SixLabors/ImageSharp)——
+- 图像处理依赖 [ImageSharp](https://github.com/SixLabors/ImageSharp)——
   System.Drawing 解不了 petdex 的 WebP 精灵图、也编不了多帧 GIF
 
 ## 构建 / 运行
+
+### PC 監控（不需要電子鐘）
+
+啟動 `AIClockBridge.exe --pc-preview` 可直接查看本機 CPU、GPU、RAM、可用溫度與 60 秒 CPU 曲線；此模式不啟動 OAuth 用量讀取、HTTP server 或裝置配對。
+一般托盤模式亦有「PC 监控（本机预览，无需设备）」；連接電子鐘後，可在「屏幕显示 → PC 监控」切到相同資料的裝置頁面。
+
+GPU 使用 Windows GPU Engine 計數器，NVIDIA 工具為 fallback；CPU 溫度需已有 LibreHardwareMonitor/OpenHardwareMonitor 的 WMI 感測服務，NVIDIA GPU 溫度由既有 nvidia-smi 取得。缺少、失敗或不支援的數值顯示 `--`，不會自動安裝驅動或要求管理員權限。新增 `System.Management` 依賴僅用來讀取既有 WMI provider。
+詳見 [PC 監控協定與驗證](../docs/PC_MONITOR.md)。
 
 需要 [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)（Windows 10
 19041+ / Windows 11）：

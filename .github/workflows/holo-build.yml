@@ -38,6 +38,7 @@ jobs:
           dotnet-version: '8.0.x'
       - run: dotnet build windows-app/AIClockBridge/AIClockBridge.csproj -c Release
       - run: dotnet run --project windows-app/HoloAi.Tests/HoloAi.Tests.csproj -c Release -- previews
+      - run: dotnet run --project windows-app/PcMonitor.Tests/PcMonitor.Tests.csproj -c Release -- previews
       - uses: actions/upload-artifact@v4
         with:
           name: holo-render-previews

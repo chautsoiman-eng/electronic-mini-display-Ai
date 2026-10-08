@@ -22,6 +22,13 @@ static class Program
         }
 
         ApplicationConfiguration.Initialize();
+        using var pcMonitor = new PcMonitor();
+        pcMonitor.Start();
+        if (args.Contains("--pc-preview"))
+        {
+            Application.Run(new PcPreviewForm(pcMonitor));
+            return;
+        }
 
         var service = new StatusService();
         var usage = new UsageFetcher();
@@ -34,7 +41,7 @@ static class Program
         var stockMonitor = new StockMonitor();
         stockMonitor.Start();
 
-        var server = new MiniHttpServer(Port,
+        using var server = new MiniHttpServer(Port,
             routes: new()
             {
                 ["/"] = () => service.Snapshot().ToJson(),
@@ -42,6 +49,7 @@ static class Program
                 ["/net"] = () => netMonitor.ToJson(SystemStatsMonitor.Snapshot()),
                 ["/music"] = () => nowPlaying.ToJson(),
                 ["/stock"] = () => stockMonitor.ToJson(),
+                ["/pc"] = () => pcMonitor.Snapshot().ToJson(),
             },
             binaryRoutes: new()
             {
@@ -84,7 +92,7 @@ static class Program
         // outright when no device is configured yet.
         server.OnRequest = (path, ip) =>
         {
-            if (path != "/status" && path != "/net" && path != "/music") return;
+            if (path != "/status" && path != "/net" && path != "/music" && path != "/pc") return;
             if (ip == "127.0.0.1" || ip == "::1" || ip.Length == 0) return;
             DeviceClient.DevicePollAt = DateTime.UtcNow;
             DeviceClient.LastSeenIp = ip;
@@ -107,7 +115,7 @@ static class Program
             Console.Error.WriteLine($"[bridge] failed to bind port {Port}: {e.Message}");
         }
 
-        var context = new TrayAppContext(service, usage, netMonitor, nowPlaying, stockMonitor, Port);
+        var context = new TrayAppContext(service, usage, netMonitor, nowPlaying, stockMonitor, pcMonitor, Port);
         usage.StartAutoRefresh();
         Application.Run(context);
     }

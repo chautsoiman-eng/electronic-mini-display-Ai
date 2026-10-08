@@ -25,7 +25,7 @@ This branch develops a 240×240 ST7789 HoloCubic-style interface for the SD2 ESP
 - [x] AI Monitor firmware integrated and PlatformIO build verified (e3f6e4a, nodemcuv2).
 - [x] Windows Holo AI menu, mirror preview, and render regression checks.
 - [ ] AI Monitor physical-device validation (USB device not connected on the development PC).
-- [ ] PC telemetry and monitor screen.
+- [x] PC telemetry, local Windows preview and firmware monitor screen (hardware validation pending).
 - [ ] Weather bridge and screen.
 - [ ] Clock and time sync.
 - [ ] WASAPI spectrum transport and display.

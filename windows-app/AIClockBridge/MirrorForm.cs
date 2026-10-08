@@ -45,6 +45,8 @@ sealed class MirrorControl : Control
 
     public bool MusicMode;
     public bool HoloMode;
+    public bool PcMode;
+    public PcTelemetry PcData = new();
     public HoloProvider HoloClaude, HoloCodex;
     public string MusicTitle = "";
     public string MusicArtist = "";
@@ -109,6 +111,11 @@ sealed class MirrorControl : Control
             g.SetClip(panel);
         }
 
+        if (PcMode)
+        {
+            PcMonitorScene.Draw(g, DeviceOK ? PcData : PcData with { Stale = true });
+            return;
+        }
         if (HoloMode)
         {
             HoloAiScene.Draw(g, HoloClaude, HoloCodex, DeviceOK);
@@ -393,10 +400,11 @@ sealed class MirrorForm : Form
     readonly NetSpeedMonitor _netMonitor;
     readonly NowPlayingMonitor _nowPlaying;
     readonly StockMonitor _stockMonitor;
+    readonly PcMonitor _pcMonitor;
     readonly MirrorControl _mirror = new();
     readonly RadioButton[] _modeButtons;
-    static readonly string[] Modes = { "auto", "claude", "codex", "net", "music", "stock", "holo_ai" };
-    static readonly string[] ModeLabels = { "自动", "Claude", "Codex", "网速", "音乐", "股票", "Holo AI" };
+    static readonly string[] Modes = { "auto", "claude", "codex", "net", "music", "stock", "holo_ai", "pc" };
+    static readonly string[] ModeLabels = { "自动", "Claude", "Codex", "网速", "音乐", "股票", "Holo AI", "PC" };
     readonly Label _statusLabel = new();
     readonly TrackBar _brightness = new() { Minimum = 0, Maximum = 100, TickStyle = TickStyle.None };
     readonly Label _brightnessValue = new();
@@ -418,12 +426,13 @@ sealed class MirrorForm : Form
     bool _applyingMode; // suppress CheckedChanged while reflecting device state
 
     public MirrorForm(StatusService service, NetSpeedMonitor netMonitor, NowPlayingMonitor nowPlaying,
-                      StockMonitor stockMonitor)
+                      StockMonitor stockMonitor, PcMonitor pcMonitor)
     {
         _service = service;
         _netMonitor = netMonitor;
         _nowPlaying = nowPlaying;
         _stockMonitor = stockMonitor;
+        _pcMonitor = pcMonitor;
 
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
@@ -609,6 +618,7 @@ sealed class MirrorForm : Form
         var modeText = info.Mode == "auto" ? "自动切换"
             : info.Mode == "net" ? "网速曲线"
             : info.Mode == "holo_ai" ? "Holo AI 监控"
+            : info.Mode == "pc" ? "PC 监控"
             : info.Mode == "stock" ? "股票行情"
             : info.Mode == "music" ? "音乐播放" : "固定显示";
         _statusLabel.Text = $"{info.Ip} · {modeText} · 数据 {info.Bridge}";
@@ -624,6 +634,13 @@ sealed class MirrorForm : Form
         _mirror.MusicMode = info.Effective == "music";
         _mirror.StockMode = info.Effective == "stock";
         _mirror.HoloMode = info.Effective == "holo_ai";
+        _mirror.PcMode = info.Effective == "pc";
+        if (_mirror.PcMode)
+        {
+            _mirror.PcData = _pcMonitor.Snapshot();
+            _mirror.Invalidate();
+            return;
+        }
         if (_mirror.HoloMode)
         {
             var status = _service.Snapshot();
@@ -699,7 +716,7 @@ sealed class MirrorForm : Form
 
     void EnsureSprite(DeviceInfo info)
     {
-        if (info.Effective is "holo_ai" or "net" or "music" or "stock") return;
+        if (info.Effective is "pc" or "holo_ai" or "net" or "music" or "stock") return;
         var slot = info.Showing == "codex" ? "codex" : "claude";
         var w = slot == "claude" ? info.ClaudeW : info.CodexW;
         var h = slot == "claude" ? info.ClaudeH : info.CodexH;
@@ -747,7 +764,7 @@ sealed class MirrorForm : Form
 
     void AnimTick()
     {
-        if (_lastInfo == null || _mirror.NetMode || _mirror.HoloMode || _mirror.MusicMode || _mirror.StockMode) return;
+        if (_lastInfo == null || _mirror.PcMode || _mirror.NetMode || _mirror.HoloMode || _mirror.MusicMode || _mirror.StockMode) return;
 
         // ~400ms red-border flash while an approval is pending (device cadence)
         if (_mirror.NeedsInput)

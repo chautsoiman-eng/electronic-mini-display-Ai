@@ -14,6 +14,8 @@ sealed class TrayAppContext : ApplicationContext
     readonly UsageFetcher _usage;
     readonly int _port;
     readonly MirrorForm _mirror;
+    readonly PcMonitor _pcMonitor;
+    PcPreviewForm _pcPreview;
     readonly ContextMenuStrip _menu = new();
 
     readonly ToolStripMenuItem _claudeUsageItem = new("Claude …") { Enabled = false };
@@ -22,12 +24,13 @@ sealed class TrayAppContext : ApplicationContext
     readonly Dictionary<string, ToolStripMenuItem> _modeItems = new();
 
     public TrayAppContext(StatusService service, UsageFetcher usage, NetSpeedMonitor netMonitor,
-                          NowPlayingMonitor nowPlaying, StockMonitor stockMonitor, int port)
+                          NowPlayingMonitor nowPlaying, StockMonitor stockMonitor, PcMonitor pcMonitor, int port)
     {
         _service = service;
         _usage = usage;
         _port = port;
-        _mirror = new MirrorForm(service, netMonitor, nowPlaying, stockMonitor);
+        _pcMonitor = pcMonitor;
+        _mirror = new MirrorForm(service, netMonitor, nowPlaying, stockMonitor, pcMonitor);
 
         BuildMenu();
         _trayIcon = new NotifyIcon
@@ -82,6 +85,7 @@ sealed class TrayAppContext : ApplicationContext
             ("固定 Codex", "codex"), ("网速曲线", "net"), ("音乐播放", "music"),
             ("股票行情", "stock"),
             ("Holo AI 监控", "holo_ai"),
+            ("PC 监控", "pc"),
         })
         {
             var item = new ToolStripMenuItem(title);
@@ -90,6 +94,12 @@ sealed class TrayAppContext : ApplicationContext
             displayMenu.DropDownItems.Add(item);
         }
         _menu.Items.Add(displayMenu);
+        _menu.Items.Add(MakeItem("PC 监控（本机预览，无需设备）", (_, _) =>
+        {
+            if (_pcPreview == null || _pcPreview.IsDisposed) _pcPreview = new PcPreviewForm(_pcMonitor);
+            _pcPreview.Show();
+            _pcPreview.Activate();
+        }));
         // (屏幕亮度在左键弹出的镜像页底部，做成滑条了)
 
         _menu.Items.Add(MakeItem("设置自选股…", (_, _) =>
@@ -208,7 +218,8 @@ sealed class TrayAppContext : ApplicationContext
             info.ClaudeCustomSprite ? "C:自定义" : "C:默认",
             info.CodexCustomSprite ? "X:自定义" : "X:默认",
         };
-        var showing = info.Effective == "net" ? "网速"
+        var showing = info.Effective == "pc" ? "PC 监控"
+            : info.Effective == "net" ? "网速"
             : info.Effective == "music" ? "音乐"
             : info.Effective == "stock" ? "股票"
             : info.Effective == "holo_ai" ? "Holo AI"
