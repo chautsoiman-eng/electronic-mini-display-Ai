@@ -64,12 +64,15 @@ void Render(string name, PcTelemetry data)
     PcMonitorScene.Draw(g, data, true);
     bitmap.Save(Path.Combine(output, $"pc-{name}.png"), ImageFormat.Png);
     Check(bitmap.Width == 240 && bitmap.Height == 240, name + " native 240x240");
-    Check(bitmap.GetPixel(20, 105).ToArgb() == (data.Stale || data.CpuPct == null
-        ? Color.FromArgb(21, 48, 57) : PcMonitorScene.Cyan).ToArgb(), name + " CPU bar");
-    Check(bitmap.GetPixel(130, 105).ToArgb() == (data.Stale || data.GpuPct == null
-        ? Color.FromArgb(21, 48, 57) : Color.OrangeRed).ToArgb(), name + " GPU bar");
-    Check(bitmap.GetPixel(20, 143).ToArgb() == (data.Stale || data.MemPct == null
-        ? Color.FromArgb(21, 48, 57) : PcMonitorScene.Cyan).ToArgb(), name + " RAM bar");
+    var expectedCpuBar = data.Stale || data.CpuPct is null or <= 0
+        ? Color.FromArgb(21, 48, 57) : data.CpuPct >= 90 ? Color.OrangeRed : PcMonitorScene.Cyan;
+    Check(bitmap.GetPixel(14, 105).ToArgb() == expectedCpuBar.ToArgb(), name + " CPU bar");
+    var expectedGpuBar = data.Stale || data.GpuPct is null or <= 0
+        ? Color.FromArgb(21, 48, 57) : data.GpuPct >= 90 ? Color.OrangeRed : PcMonitorScene.Cyan;
+    Check(bitmap.GetPixel(126, 105).ToArgb() == expectedGpuBar.ToArgb(), name + " GPU bar");
+    var expectedRamBar = data.Stale || data.MemPct is null or <= 0
+        ? Color.FromArgb(21, 48, 57) : data.MemPct >= 90 ? Color.OrangeRed : PcMonitorScene.Cyan;
+    Check(bitmap.GetPixel(14, 143).ToArgb() == expectedRamBar.ToArgb(), name + " RAM bar");
     for (int y = 232; y < 240; y++)
         for (int x = 0; x < 240; x++)
             Check(bitmap.GetPixel(x, y).ToArgb() == Color.Black.ToArgb(), name + " bottom safety margin");

@@ -15,6 +15,7 @@
 #include <ArduinoJson.h>
 #include <TFT_eSPI.h>
 #include <AnimatedGIF.h>
+#include <time.h>
 
 #include "config.h"
 #include "img/claude_sprite.h"
@@ -73,7 +74,7 @@ unsigned long lastSwitchMs = 0;
 // Display override, settable from the Mac app via POST /api/display:
 // auto = follow working status, claude/codex = pin that app on screen,
 // net/music = show Mac-side telemetry pages instead of the pet.
-enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_NET, MODE_MUSIC, MODE_STOCK, MODE_HOLO_AI, MODE_PC };
+enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_CLOCK, MODE_NET, MODE_MUSIC, MODE_STOCK, MODE_HOLO_AI, MODE_PC };
 DisplayMode displayMode = MODE_AUTO;
 
 DisplayMode effectiveMode();
@@ -90,6 +91,25 @@ bool statusMusicPlaying = false;
 unsigned long lastHoloDrawMs = 0;
 bool holoDirty = true;
 DisplayMode lastEffectiveMode = MODE_AUTO;
+
+// ---------- clock mode state ----------
+// ESP8266 system time keeps advancing after Wi-Fi drops. We only regard it as
+// synchronized after SNTP has supplied a plausible epoch.
+bool clockSyncStarted = false;
+bool clockChromeDrawn = false;
+bool clockLastSynced = false;
+int clockLastMinute = -2;
+int clockLastYearDay = -2;
+unsigned long lastClockCheckMs = 0;
+
+// Future weather providers update this struct independently. Until then the
+// renderer displays -- and never substitutes fixture data for live weather.
+struct ClockWeather {
+  bool temperatureValid = false;
+  int temperatureC = 0;
+  String condition;
+};
+ClockWeather clockWeather;
 
 // ---------- net speed mode state ----------
 // Rendering is decoupled from the network: pollNet() fetches every 2s and
@@ -1589,6 +1609,86 @@ void pollBridge() {
   refreshStatusDisplay();
 }
 
+// ---------- Clock / NTP ----------
+void startClockSync() {
+  if (clockSyncStarted || WiFi.status() != WL_CONNECTED) return;
+  configTime(CLOCK_TIMEZONE, CLOCK_NTP_SERVER_1, CLOCK_NTP_SERVER_2);
+  clockSyncStarted = true;
+  Serial.printf("[clock] SNTP started, timezone=%s\n", CLOCK_TIMEZONE);
+}
+
+bool clockLocalTime(struct tm &local) {
+  time_t now = time(nullptr);
+  // 2021-01-01: a boot-relative or zero epoch must never appear as real time.
+  if (now < 1609459200) return false;
+  localtime_r(&now, &local);
+  return true;
+}
+
+void drawClockChrome() {
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextDatum(TL_DATUM);
+  const uint16_t cyan = tft.color565(88, 220, 222);
+  const uint16_t muted = tft.color565(113, 151, 164);
+  const uint16_t grid = tft.color565(24, 71, 82);
+  tft.setTextColor(cyan, TFT_BLACK);
+  tft.drawString("CLOCK", 14, 8, 2);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(muted, TFT_BLACK);
+  tft.drawString(CLOCK_TIMEZONE_LABEL, 226, 9, 1);
+  tft.drawFastHLine(14, 29, 212, grid);
+  tft.drawFastHLine(14, 178, 212, grid);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString("WEATHER", 14, 187, 1);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  bool validTemp = clockWeather.temperatureValid &&
+                   clockWeather.temperatureC >= -90 && clockWeather.temperatureC <= 70;
+  String temp = validTemp ? String(clockWeather.temperatureC) + "C" : "--";
+  tft.drawString(temp, 14, 201, 4);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(cyan, TFT_BLACK);
+  String condition = clockWeather.condition.length() ? clockWeather.condition : "WEATHER --";
+  condition.toUpperCase();
+  if (condition.length() > 14) condition = condition.substring(0, 14);
+  tft.drawString(condition, 226, 205, 2);
+  clockChromeDrawn = true;
+}
+
+void drawClockDynamic(bool force = false) {
+  if (!clockChromeDrawn) drawClockChrome();
+  struct tm local;
+  bool synced = clockLocalTime(local);
+  int minute = synced ? local.tm_min : -1;
+  int yearDay = synced ? local.tm_yday : -1;
+  if (!force && synced == clockLastSynced && minute == clockLastMinute &&
+      yearDay == clockLastYearDay) return;
+  clockLastSynced = synced;
+  clockLastMinute = minute;
+  clockLastYearDay = yearDay;
+
+  const uint16_t cyan = tft.color565(88, 220, 222);
+  // Only erase the changing time/date region; chrome and weather do not flash.
+  tft.fillRect(8, 38, 224, 134, TFT_BLACK);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  if (!synced) {
+    tft.drawString("--:--", 120, 74, 6);
+    tft.drawString("---- -- --", 120, 125, 2);
+    tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+    tft.drawString("WAITING FOR NTP", 120, 153, 2);
+    return;
+  }
+
+  char timeText[6], dateText[11];
+  strftime(timeText, sizeof(timeText), "%H:%M", &local);
+  strftime(dateText, sizeof(dateText), "%Y-%m-%d", &local);
+  static const char *weekdays[] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
+  tft.drawString(timeText, 120, 74, 6);
+  tft.drawString(dateText, 120, 125, 4);
+  tft.setTextColor(cyan, TFT_BLACK);
+  tft.drawString(weekdays[local.tm_wday], 120, 153, 2);
+}
+
 // ---------- PC monitor ----------
 const unsigned long PC_POLL_MS = 1000;
 const unsigned long PC_STALE_MS = 5000;
@@ -1855,6 +1955,7 @@ void handleSerialFrame(char *line) {
       if (m == "auto") displayMode = MODE_AUTO;
       else if (m == "claude") displayMode = MODE_CLAUDE;
       else if (m == "codex") displayMode = MODE_CODEX;
+      else if (m == "clock") displayMode = MODE_CLOCK;
       else if (m == "net") displayMode = MODE_NET;
       else if (m == "music") displayMode = MODE_MUSIC;
       else if (m == "stock") displayMode = MODE_STOCK;
@@ -1980,6 +2081,7 @@ void handleSave() {
 const char *displayModeName(DisplayMode m) {
   if (m == MODE_CLAUDE) return "claude";
   if (m == MODE_CODEX) return "codex";
+  if (m == MODE_CLOCK) return "clock";
   if (m == MODE_NET) return "net";
   if (m == MODE_MUSIC) return "music";
   if (m == MODE_STOCK) return "stock";
@@ -2002,6 +2104,8 @@ void handleApiInfo() {
   doc["brightness"] = brightness;
   doc["wired"] = wiredActive(); // true = data currently arrives over USB serial
   doc["fw"] = FW_VERSION;
+  doc["clock_synced"] = time(nullptr) >= 1609459200;
+  doc["clock_timezone"] = CLOCK_TIMEZONE_LABEL;
   JsonObject c = doc["claude"].to<JsonObject>();
   c["status"] = claudeStatus.status;
   c["custom_sprite"] = claudeCustom;
@@ -2022,13 +2126,14 @@ void handleApiDisplay() {
   if (mode == "auto") displayMode = MODE_AUTO;
   else if (mode == "claude") displayMode = MODE_CLAUDE;
   else if (mode == "codex") displayMode = MODE_CODEX;
+  else if (mode == "clock") displayMode = MODE_CLOCK;
   else if (mode == "net") displayMode = MODE_NET;
   else if (mode == "music") displayMode = MODE_MUSIC;
   else if (mode == "stock") displayMode = MODE_STOCK;
   else if (mode == "holo_ai") displayMode = MODE_HOLO_AI;
   else if (mode == "pc") displayMode = MODE_PC;
   else {
-    webServer.send(400, "text/plain", "mode must be auto|claude|codex|net|music|stock|holo_ai|pc");
+    webServer.send(400, "text/plain", "mode must be auto|claude|codex|clock|net|music|stock|holo_ai|pc");
     return;
   }
   Serial.printf("[api] display mode = %s\n", mode.c_str());
@@ -2383,6 +2488,7 @@ void setup() {
   setupWiFi();
 
   if (WiFi.status() == WL_CONNECTED) {
+    startClockSync();
     setupWebServer();
     webServerStarted = true;
 
@@ -2409,6 +2515,7 @@ void loop() {
   if (!webServerStarted && WiFi.status() == WL_CONNECTED) {
     // WiFi came up after boot (portal or slow AP); the portal has released
     // port 80 by now, so the admin server can bind it
+    startClockSync();
     setupWebServer();
     webServerStarted = true;
     showMainUiIfNeeded();
@@ -2425,7 +2532,12 @@ void loop() {
   DisplayMode eff = effectiveMode();
   if (eff != lastEffectiveMode) {
     lastEffectiveMode = eff;
-    if (eff == MODE_PC) {
+    if (eff == MODE_CLOCK) {
+      clockChromeDrawn = false;
+      clockLastMinute = -2;
+      clockLastYearDay = -2;
+      drawClockDynamic(true);
+    } else if (eff == MODE_PC) {
       pcDirty = true;
       lastPcPollMs = nowMs - PC_POLL_MS;
     } else if (eff == MODE_HOLO_AI) {
@@ -2445,7 +2557,12 @@ void loop() {
     }
   }
 
-  if (eff == MODE_PC) {
+  if (eff == MODE_CLOCK) {
+    if (nowMs - lastClockCheckMs >= 1000UL) {
+      lastClockCheckMs = nowMs;
+      drawClockDynamic();
+    }
+  } else if (eff == MODE_PC) {
     if (nowMs - lastPcPollMs >= PC_POLL_MS) {
       lastPcPollMs = nowMs;
       // 只有 #PC 能抑制 PC HTTP 輪詢；單獨 #STATUS 不應讓 PC 頁失去資料。

@@ -22,6 +22,11 @@ static class Program
         }
 
         ApplicationConfiguration.Initialize();
+        if (args.Contains("--clock-preview"))
+        {
+            Application.Run(new ClockPreviewForm());
+            return;
+        }
         using var pcMonitor = new PcMonitor();
         pcMonitor.Start();
         if (args.Contains("--pc-preview"))

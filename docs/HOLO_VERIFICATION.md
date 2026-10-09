@@ -3,7 +3,7 @@
 ## 已執行
 
 - ESP8266：PlatformIO 6.1.19，`nodemcuv2` 編譯及連結成功，RAM 44148 / 81920 bytes，Flash 840363 / 1044464 bytes。
-- Windows：.NET SDK 8.0.425，Release 編譯成功。既有 ImageSharp 3.1.12 的 NuGet 安全性警告仍存在；本次未升級此依賴。
+- Windows：.NET SDK 8.0.425，Release 編譯成功。圖片依賴已在後續提交改為 Magick.NET；CI 會檢查直接與間接 NuGet 漏洞。
 - Holo 繪圖測試：未知值、百分比四捨五入／上限、警戒色、重設時間與四條 bar 的像素檢查，另輸出 normal / unknown / offline 預覽。
 - 尚未燒錄或驗證實機：本機只列出內建 COM1，沒有電子鐘的 CH340 USB 埠。Windows 預覽使用相同資料及座標重新繪圖，並非裝置截圖，字型可能不同。
 
@@ -27,4 +27,4 @@ GitHub Actions 的 `Holo build and render checks` 會建置韌體、Windows app 
 4. 從音樂、網速、股票切入 Holo，再切回各模式；確認 Holo 標題左對齊、AUTO 音樂播放／停止與審批優先切換正常。在 Holo 上傳／重設寵物圖片，不應覆蓋 Holo。
 5. 拔除裝置後 Windows 鏡像顯示 DEVICE OFFLINE；重接後恢復。另需在實機觀察長時間刷新、WiFi 配網與 LittleFS 圖片保存。
 
-PC 監控、天氣、時鐘、音訊 FFT 與水平鏡像仍是獨立的 roadmap 待辦。
+PC 監控與時鐘已完成；獨立天氣頁、音訊 FFT 與水平鏡像仍是 roadmap 待辦。

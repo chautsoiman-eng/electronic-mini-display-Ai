@@ -122,7 +122,7 @@ static class DeviceClient
         }
     }
 
-    /// POST /api/display  mode=auto|claude|codex|net|music
+    /// POST /api/display  mode=auto|claude|codex|clock|net|music|stock|holo_ai|pc
     public static Task SetDisplayMode(string mode) =>
         PostForm("api/display", new() { ["mode"] = mode });
 

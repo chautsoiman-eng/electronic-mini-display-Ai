@@ -46,6 +46,8 @@ sealed class MirrorControl : Control
     public bool MusicMode;
     public bool HoloMode;
     public bool PcMode;
+    public bool ClockMode;
+    public long ClockMinute = long.MinValue;
     public PcTelemetry PcData = new();
     public HoloProvider HoloClaude, HoloCodex;
     public string MusicTitle = "";
@@ -114,6 +116,11 @@ sealed class MirrorControl : Control
         if (PcMode)
         {
             PcMonitorScene.Draw(g, DeviceOK ? PcData : PcData with { Stale = true });
+            return;
+        }
+        if (ClockMode)
+        {
+            ClockScene.Draw(g, ClockScene.FromUtc(DateTimeOffset.UtcNow));
             return;
         }
         if (HoloMode)
@@ -403,8 +410,8 @@ sealed class MirrorForm : Form
     readonly PcMonitor _pcMonitor;
     readonly MirrorControl _mirror = new();
     readonly RadioButton[] _modeButtons;
-    static readonly string[] Modes = { "auto", "claude", "codex", "net", "music", "stock", "holo_ai", "pc" };
-    static readonly string[] ModeLabels = { "自动", "Claude", "Codex", "网速", "音乐", "股票", "Holo AI", "PC" };
+    static readonly string[] Modes = { "auto", "claude", "codex", "clock", "net", "music", "stock", "holo_ai", "pc" };
+    static readonly string[] ModeLabels = { "自动", "Claude", "Codex", "时钟", "网速", "音乐", "股票", "Holo AI", "PC" };
     readonly Label _statusLabel = new();
     readonly TrackBar _brightness = new() { Minimum = 0, Maximum = 100, TickStyle = TickStyle.None };
     readonly Label _brightnessValue = new();
@@ -448,7 +455,8 @@ sealed class MirrorForm : Form
 
         _modeButtons = new RadioButton[Modes.Length];
         // 分成兩列，保留標籤寬度，避免新增模式後所有按鈕都過窄。
-        var segWidth = Px(288) / 4;
+        const int columns = 5;
+        var segWidth = Px(288) / columns;
         for (int i = 0; i < Modes.Length; i++)
         {
             var btn = new RadioButton
@@ -459,7 +467,7 @@ sealed class MirrorForm : Form
                 Tag = Modes[i],
                 AutoSize = false,
             };
-            btn.SetBounds(Px(14) + (i % 4) * segWidth, Px(312 + (i / 4) * 30), segWidth, Px(28));
+            btn.SetBounds(Px(14) + (i % columns) * segWidth, Px(312 + (i / columns) * 30), segWidth, Px(28));
             btn.CheckedChanged += ModeChanged;
             _modeButtons[i] = btn;
             Controls.Add(btn);
@@ -619,6 +627,7 @@ sealed class MirrorForm : Form
             : info.Mode == "net" ? "网速曲线"
             : info.Mode == "holo_ai" ? "Holo AI 监控"
             : info.Mode == "pc" ? "PC 监控"
+            : info.Mode == "clock" ? "时钟"
             : info.Mode == "stock" ? "股票行情"
             : info.Mode == "music" ? "音乐播放" : "固定显示";
         _statusLabel.Text = $"{info.Ip} · {modeText} · 数据 {info.Bridge}";
@@ -635,6 +644,17 @@ sealed class MirrorForm : Form
         _mirror.StockMode = info.Effective == "stock";
         _mirror.HoloMode = info.Effective == "holo_ai";
         _mirror.PcMode = info.Effective == "pc";
+        _mirror.ClockMode = info.Effective == "clock";
+        if (_mirror.ClockMode)
+        {
+            var minute = ClockScene.FromUtc(DateTimeOffset.UtcNow).MinuteKey;
+            if (_mirror.ClockMinute != minute)
+            {
+                _mirror.ClockMinute = minute;
+                _mirror.Invalidate();
+            }
+            return;
+        }
         if (_mirror.PcMode)
         {
             _mirror.PcData = _pcMonitor.Snapshot();
@@ -716,7 +736,7 @@ sealed class MirrorForm : Form
 
     void EnsureSprite(DeviceInfo info)
     {
-        if (info.Effective is "pc" or "holo_ai" or "net" or "music" or "stock") return;
+        if (info.Effective is "clock" or "pc" or "holo_ai" or "net" or "music" or "stock") return;
         var slot = info.Showing == "codex" ? "codex" : "claude";
         var w = slot == "claude" ? info.ClaudeW : info.CodexW;
         var h = slot == "claude" ? info.ClaudeH : info.CodexH;
@@ -764,7 +784,7 @@ sealed class MirrorForm : Form
 
     void AnimTick()
     {
-        if (_lastInfo == null || _mirror.PcMode || _mirror.NetMode || _mirror.HoloMode || _mirror.MusicMode || _mirror.StockMode) return;
+        if (_lastInfo == null || _mirror.ClockMode || _mirror.PcMode || _mirror.NetMode || _mirror.HoloMode || _mirror.MusicMode || _mirror.StockMode) return;
 
         // ~400ms red-border flash while an approval is pending (device cadence)
         if (_mirror.NeedsInput)

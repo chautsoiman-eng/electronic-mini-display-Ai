@@ -1,7 +1,19 @@
 #pragma once
 
 // ---- Firmware version (shown on the first-time WiFi setup screen & /api/info) ----
-#define FW_VERSION "0.4.11"
+#define FW_VERSION "0.5.0"
+
+// ---- Clock / NTP ----
+// POSIX TZ string; override at build time for another location.
+// Asia/Taipei is UTC+8 year-round, represented by POSIX as CST-8.
+#ifndef CLOCK_TIMEZONE
+#define CLOCK_TIMEZONE "CST-8"
+#endif
+#ifndef CLOCK_TIMEZONE_LABEL
+#define CLOCK_TIMEZONE_LABEL "TAIPEI"
+#endif
+#define CLOCK_NTP_SERVER_1 "pool.ntp.org"
+#define CLOCK_NTP_SERVER_2 "time.google.com"
 
 // ---- Bridge polling ----
 #define BRIDGE_DEFAULT_PORT 8765

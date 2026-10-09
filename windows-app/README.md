@@ -36,6 +36,13 @@
 GPU 使用 Windows GPU Engine 計數器，NVIDIA 工具為 fallback；CPU 溫度需已有 LibreHardwareMonitor/OpenHardwareMonitor 的 WMI 感測服務，NVIDIA GPU 溫度由既有 nvidia-smi 取得。缺少、失敗或不支援的數值顯示 `--`，不會自動安裝驅動或要求管理員權限。新增 `System.Management` 依賴僅用來讀取既有 WMI provider。
 詳見 [PC 監控協定與驗證](../docs/PC_MONITOR.md)。
 
+### Clock（不需要電子鐘）
+
+啟動 `AIClockBridge.exe --clock-preview` 可查看使用 `Asia/Taipei` 的 240×240
+即時 Clock renderer；一般托盤模式亦有「时钟（本机预览，无需设备）」。連接電子鐘後，
+可在「屏幕显示 → 时钟」切換裝置頁面。天氣來源尚未接入，正確顯示 `--`。
+詳見 [Clock 設計與驗證](../docs/CLOCK.md)。
+
 需要 [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)（Windows 10
 19041+ / Windows 11）：
 

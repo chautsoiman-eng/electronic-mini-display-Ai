@@ -16,6 +16,7 @@ sealed class TrayAppContext : ApplicationContext
     readonly MirrorForm _mirror;
     readonly PcMonitor _pcMonitor;
     PcPreviewForm _pcPreview;
+    ClockPreviewForm _clockPreview;
     readonly ContextMenuStrip _menu = new();
 
     readonly ToolStripMenuItem _claudeUsageItem = new("Claude …") { Enabled = false };
@@ -83,6 +84,7 @@ sealed class TrayAppContext : ApplicationContext
         {
             ("自动（谁在干活显示谁）", "auto"), ("固定 Claude", "claude"),
             ("固定 Codex", "codex"), ("网速曲线", "net"), ("音乐播放", "music"),
+            ("时钟", "clock"),
             ("股票行情", "stock"),
             ("Holo AI 监控", "holo_ai"),
             ("PC 监控", "pc"),
@@ -99,6 +101,12 @@ sealed class TrayAppContext : ApplicationContext
             if (_pcPreview == null || _pcPreview.IsDisposed) _pcPreview = new PcPreviewForm(_pcMonitor);
             _pcPreview.Show();
             _pcPreview.Activate();
+        }));
+        _menu.Items.Add(MakeItem("时钟（本机预览，无需设备）", (_, _) =>
+        {
+            if (_clockPreview == null || _clockPreview.IsDisposed) _clockPreview = new ClockPreviewForm();
+            _clockPreview.Show();
+            _clockPreview.Activate();
         }));
         // (屏幕亮度在左键弹出的镜像页底部，做成滑条了)
 
@@ -219,6 +227,7 @@ sealed class TrayAppContext : ApplicationContext
             info.CodexCustomSprite ? "X:自定义" : "X:默认",
         };
         var showing = info.Effective == "pc" ? "PC 监控"
+            : info.Effective == "clock" ? "时钟"
             : info.Effective == "net" ? "网速"
             : info.Effective == "music" ? "音乐"
             : info.Effective == "stock" ? "股票"

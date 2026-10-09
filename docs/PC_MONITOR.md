@@ -43,4 +43,4 @@ python -m platformio run -d firmware -e nodemcuv2
 
 測試包含數值界限、未知值、GPU 聚合、NVIDIA 不支援回覆、歷史上限與缺口、逾時、JSON 格式／大小、真實 localhost HTTP server，以及正常／未知／過期畫面。`--live` 額外採樣 7 秒並輸出 pc-live.json / pc-live.png。本機已觀察到 CPU、GPU、RAM、GPU 溫度；CPU 溫度無 provider，正確保持 null。
 
-電子鐘尚未到貨。到貨後仍需測試 PC 與原模式切換、HTTP／#PC 更新、拔線超過 5 秒的過期畫面、重連與 bridge 重啟、60 點邊界，以及 240×240 面板長時間刷新。現有 ImageSharp 3.1.12 的 NuGet 安全性警告不屬於本次 PC 監控修改，仍存在。
+電子鐘尚未到貨。到貨後仍需測試 PC 與原模式切換、HTTP／#PC 更新、拔線超過 5 秒的過期畫面、重連與 bridge 重啟、60 點邊界，以及 240×240 面板長時間刷新。圖片依賴已在後續提交改為 Magick.NET；CI 會檢查直接與間接 NuGet 漏洞。
