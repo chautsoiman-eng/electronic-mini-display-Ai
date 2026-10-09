@@ -11,9 +11,10 @@ import Foundation
 // NOTE: the port is opened non-exclusively so esptool/pio can still flash,
 // but quit the app before flashing to avoid the two readers fighting.
 final class SerialLink {
+    /// The running link, for DeviceClient's wired control path.
+    static weak var current: SerialLink?
     private let service: StatusService
     private let netMonitor: NetSpeedMonitor
-    private let stockMonitor: StockMonitor
 
     private var fd: Int32 = -1
     private var portPath = ""
@@ -22,16 +23,17 @@ final class SerialLink {
     private var lastHelloAt = Date.distantPast
     private var lastStatusAt = Date.distantPast
     private var lastNetAt = Date.distantPast
+    private var lastTimeAt = Date.distantPast
     private var rxBuf = Data()
     private var timer: Timer?
 
-    init(service: StatusService, netMonitor: NetSpeedMonitor, stockMonitor: StockMonitor) {
+    init(service: StatusService, netMonitor: NetSpeedMonitor) {
         self.service = service
         self.netMonitor = netMonitor
-        self.stockMonitor = stockMonitor
     }
 
     func start() {
+        SerialLink.current = self
         // one 250ms tick drives everything: port scan, handshake, reads, pushes
         timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
             self?.tick()
@@ -39,6 +41,16 @@ final class SerialLink {
     }
 
     var isLinked: Bool { linked }
+
+    /// Sends one #CMD frame if the clock is handshaken over USB. Display mode,
+    /// brightness and the web admin password then skip HTTP entirely (the
+    /// firmware applies and persists them exactly like the HTTP API).
+    func trySendCommand(_ fields: [String: Any]) -> Bool {
+        guard linked, fd >= 0,
+              let json = try? JSONSerialization.data(withJSONObject: fields) else { return false }
+        send(frame("#CMD ", json))
+        return linked // send() unlinks on a write failure (unplugged)
+    }
 
     private func tick() {
         if fd < 0 {
@@ -62,7 +74,12 @@ final class SerialLink {
         if now.timeIntervalSince(lastStatusAt) > 5 {
             lastStatusAt = now
             send(frame("#STATUS ", service.snapshot().jsonData()))
-            send(frame("#STOCK ", stockMonitor.jsonData()))
+        }
+        if now.timeIntervalSince(lastTimeAt) > 60 {
+            // wired-only clocks have no NTP; the firmware ignores this once SNTP works
+            lastTimeAt = now
+            let epoch = Int(now.timeIntervalSince1970)
+            send(Data("#TIME {\"epoch\":\(epoch)}\n".utf8))
         }
         if now.timeIntervalSince(lastNetAt) > 2 {
             lastNetAt = now
@@ -156,6 +173,7 @@ final class SerialLink {
                     linked = true
                     lastStatusAt = .distantPast // push a status immediately
                     lastNetAt = .distantPast
+                    lastTimeAt = .distantPast
                     FileHandle.standardError.write(Data("[serial] linked \(portPath): \(line)\n".utf8))
                 }
             }

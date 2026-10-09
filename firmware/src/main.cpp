@@ -75,7 +75,7 @@ unsigned long lastSwitchMs = 0;
 // Display override, settable from the Mac app via POST /api/display:
 // auto = follow working status, claude/codex = pin that app on screen,
 // net/music = show Mac-side telemetry pages instead of the pet.
-enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_CLOCK, MODE_WEATHER, MODE_NET, MODE_MUSIC, MODE_STOCK, MODE_HOLO_AI, MODE_PC };
+enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_CLOCK, MODE_WEATHER, MODE_NET, MODE_MUSIC, MODE_HOLO_AI, MODE_PC };
 DisplayMode displayMode = MODE_AUTO;
 
 DisplayMode effectiveMode();
@@ -159,29 +159,6 @@ const int MUSIC_TEXT_W = 232;
 const int MUSIC_TEXT_H = 44;
 const int MUSIC_TEXT_X = 4, MUSIC_TEXT_Y = 150;
 const unsigned long MUSIC_POLL_INTERVAL_MS = 2000;
-// ---------- stock watchlist mode state ----------
-// Rows come pre-formatted from the bridge (GET /stock or serial #STOCK):
-// ASCII code + price/pct strings + up flag, so the firmware just paints.
-const unsigned long STOCK_POLL_INTERVAL_MS = 5000;
-const int MAX_STOCKS = 4;
-struct StockRow {
-  String code, price, pct;
-  int up = 0; // 1 rising (red, CN convention) / -1 falling (green) / 0 flat
-};
-StockRow stocks[MAX_STOCKS];
-int stockCount = 0;
-bool stockEverLoaded = false;
-bool stockDirty = false;
-bool stockChromeDrawn = false;
-String stockLastCode[MAX_STOCKS]; // top line (code + CJK name strip)
-String stockLastVal[MAX_STOCKS];  // value line (price + pct)
-unsigned long lastStockPollMs = 0;
-// CJK names come as Mac-rendered RGB565 strips (GET /stock/names.raw, one
-// 156x16 strip per row) - names_rev says when to re-fetch. -1 = not drawn.
-const int STOCK_NAME_W = 156, STOCK_NAME_H = 16;
-int stockNamesRev = -1;
-int stockNamesDrawnRev = -1;
-
 String musicTitle, musicArtist, musicAlbum;
 bool musicPlaying = false;
 int musicElapsed = 0, musicDuration = 0;
@@ -191,6 +168,63 @@ bool musicHasArtwork = false;
 bool musicChromeDrawn = false;
 int musicSpectrum[24] = {0};
 unsigned long lastMusicPollMs = 0;
+// Wired-only music: #MUSIC frames replace HTTP /music, and the cover/text
+// bitmaps arrive as #IMG row chunks after the clock asks with #NEED.
+unsigned long musicSerialMs = 0;
+bool musicSerialSeen = false;
+// #CMD sprite_dump state (see pumpSpriteDump)
+int spriteDumpSlot = -1; // APP_CLAUDE / APP_CODEX while a dump is running
+size_t spriteDumpOffset = 0;
+
+bool wiredActive();
+DisplayMode effectiveMode();
+
+// Minimal base64 (no line breaks) for #IMG / #SPR payloads.
+static int b64Value(char c) {
+  if (c >= 'A' && c <= 'Z') return c - 'A';
+  if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+  if (c >= '0' && c <= '9') return c - '0' + 52;
+  if (c == '+') return 62;
+  if (c == '/') return 63;
+  return -1;
+}
+
+// Decodes up to the end of string or a ',' separator into out (capacity
+// outCap); returns bytes written or -1 on bad input. *end gets the stop point.
+int b64Decode(const char *in, uint8_t *out, int outCap, const char **end = nullptr) {
+  int n = 0, bits = 0, acc = 0;
+  for (; *in && *in != ','; in++) {
+    if (*in == '=') continue;
+    int v = b64Value(*in);
+    if (v < 0) return -1;
+    acc = ((acc << 6) | v) & 0xFFFFFF; // only the low bits are ever read
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      if (n >= outCap) return -1;
+      out[n++] = (uint8_t)((acc >> bits) & 0xFF);
+    }
+  }
+  if (end) *end = in;
+  return n;
+}
+
+// Encodes len bytes into out (needs 4*ceil(len/3)+1); returns chars written.
+int b64Encode(const uint8_t *in, int len, char *out) {
+  static const char *tbl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  int o = 0;
+  for (int i = 0; i < len; i += 3) {
+    uint32_t v = (uint32_t)in[i] << 16;
+    if (i + 1 < len) v |= (uint32_t)in[i + 1] << 8;
+    if (i + 2 < len) v |= in[i + 2];
+    out[o++] = tbl[(v >> 18) & 63];
+    out[o++] = tbl[(v >> 12) & 63];
+    out[o++] = i + 1 < len ? tbl[(v >> 6) & 63] : '=';
+    out[o++] = i + 2 < len ? tbl[v & 63] : '=';
+  }
+  out[o] = 0;
+  return o;
+}
 
 int claudeFrame = 0;
 int codexFrame = 0;
@@ -254,6 +288,33 @@ void loadBrightness() {
   int v = f.readStringUntil('\n').toInt();
   f.close();
   if (v >= 0 && v <= 100) brightness = v;
+}
+
+// Optional admin password for the device's web page and control API. Empty =
+// open, like before. Clearable over USB (#CMD {"admin_password":""}) because
+// that needs physical access to the clock.
+String adminPassword;
+
+void loadAdminPassword() {
+  adminPassword = "";
+  File f = LittleFS.open(ADMIN_PASSWORD_FILE, "r");
+  if (!f) return;
+  adminPassword = f.readStringUntil('\n');
+  adminPassword.trim();
+  f.close();
+}
+
+void saveAdminPassword(const String &pass) {
+  adminPassword = pass;
+  adminPassword.trim();
+  if (adminPassword.length() == 0) {
+    LittleFS.remove(ADMIN_PASSWORD_FILE);
+    return;
+  }
+  File f = LittleFS.open(ADMIN_PASSWORD_FILE, "w");
+  if (!f) return;
+  f.println(adminPassword);
+  f.close();
 }
 
 void saveBrightness() {
@@ -1322,10 +1383,18 @@ void drawMusicScreen(bool coverChanged, bool textChanged) {
     musicChromeDrawn = true;
   }
   if (coverChanged) {
-    if (!drawMusicCoverFromBridge()) drawMusicCoverPlaceholder();
+    if (!drawMusicCoverFromBridge()) {
+      drawMusicCoverPlaceholder();
+      // wired-only: the bridge streams the cover as #IMG rows over the placeholder
+      if (wiredActive() && musicHasArtwork)
+        Serial.printf("#NEED {\"k\":\"cover\",\"rev\":%d}\n", musicArtworkRev);
+    }
   }
   if (textChanged) {
-    if (!drawMusicTextFromBridge()) drawMusicTextFallback();
+    if (!drawMusicTextFromBridge()) {
+      drawMusicTextFallback();
+      if (wiredActive()) Serial.printf("#NEED {\"k\":\"text\",\"rev\":%d}\n", musicTextRev);
+    }
   }
 
   const int spectrumY = 198;
@@ -1347,6 +1416,32 @@ void drawMusicScreen(bool coverChanged, bool textChanged) {
   tft.fillRect(bx, by, (int)(bw * progress), bh, color);
 }
 
+// Shared by HTTP /music and the serial #MUSIC frame. Only repaints while the
+// music page is on screen; otherwise it just keeps the state fresh.
+bool handleMusicPayload(const String &payload, bool draw) {
+  JsonDocument doc;
+  if (deserializeJson(doc, payload)) return false;
+  musicTitle = doc["title"] | "";
+  musicArtist = doc["artist"] | "";
+  musicAlbum = doc["album"] | "";
+  musicPlaying = doc["playing"] | false;
+  statusMusicPlaying = musicPlaying; // fast stop-detection while music shows
+  musicElapsed = doc["elapsed"] | 0;
+  musicDuration = doc["duration"] | 0;
+  musicHasArtwork = doc["has_artwork"] | false;
+  int rev = doc["artwork_rev"] | -1;
+  bool coverChanged = rev != musicArtworkRev;
+  musicArtworkRev = rev;
+  int tRev = doc["text_rev"] | -1;
+  bool textChanged = tRev != musicTextRev;
+  musicTextRev = tRev;
+  JsonArray spectrum = doc["spectrum"];
+  for (int i = 0; i < 24; i++)
+    musicSpectrum[i] = i < (int)spectrum.size() ? constrain(spectrum[i].as<int>(), 0, 100) : 0;
+  if (draw) drawMusicScreen(coverChanged, textChanged);
+  return true;
+}
+
 void pollMusic() {
   if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return;
   WiFiClient client;
@@ -1355,170 +1450,39 @@ void pollMusic() {
   http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
   if (!http.begin(client, url)) return;
   int code = http.GET();
-  if (code == HTTP_CODE_OK) {
-    JsonDocument doc;
-    if (!deserializeJson(doc, http.getString())) {
-      musicTitle = doc["title"] | "";
-      musicArtist = doc["artist"] | "";
-      musicAlbum = doc["album"] | "";
-      musicPlaying = doc["playing"] | false;
-      statusMusicPlaying = musicPlaying; // fast stop-detection while music shows
-      musicElapsed = doc["elapsed"] | 0;
-      musicDuration = doc["duration"] | 0;
-      musicHasArtwork = doc["has_artwork"] | false;
-      int rev = doc["artwork_rev"] | -1;
-      bool coverChanged = rev != musicArtworkRev;
-      musicArtworkRev = rev;
-      int tRev = doc["text_rev"] | -1;
-      bool textChanged = tRev != musicTextRev;
-      musicTextRev = tRev;
-      JsonArray spectrum = doc["spectrum"];
-      for (int i = 0; i < 24; i++)
-        musicSpectrum[i] = i < (int)spectrum.size() ? constrain(spectrum[i].as<int>(), 0, 100) : 0;
-      drawMusicScreen(coverChanged, textChanged);
-    }
-  }
-  http.end();
+  String body = code == HTTP_CODE_OK ? http.getString() : String();
+  http.end(); // free the socket before drawMusicScreen opens cover/text requests
+  if (body.length()) handleMusicPayload(body, true);
 }
 
-// ---------- stock watchlist screen ----------
-
-bool handleStockPayload(const String &payload) {
+// #IMG {"k":"cover"|"text","rev":N,"row":r,"d":"<b64 row>,<b64 row>..."}: whole
+// RGB565 rows (pushImage byte order), each base64-encoded on its own so it
+// decodes straight into rowBuf - no extra buffer. Rows for a stale rev or
+// another page are dropped.
+void handleImageFrame(const char *json) {
   JsonDocument doc;
-  if (deserializeJson(doc, payload)) return false;
-  JsonArray arr = doc["stocks"];
-  stockCount = 0;
-  for (JsonObject s : arr) {
-    if (stockCount >= MAX_STOCKS) break;
-    stocks[stockCount].code = s["code"] | "";
-    stocks[stockCount].price = s["price"] | "";
-    stocks[stockCount].pct = s["pct"] | "";
-    stocks[stockCount].up = s["up"] | 0;
-    stockCount++;
-  }
-  stockNamesRev = doc["names_rev"] | -1;
-  stockEverLoaded = true;
-  stockDirty = true;
-  return true;
-}
-
-// Streams the Mac-rendered name strips and blits one per row (top line,
-// right of the ASCII code). Wired-only mode has no HTTP: codes still show.
-bool drawStockNames() {
-  if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return false;
-  WiFiClient client;
-  HTTPClient http;
-  String url = "http://" + bridgeHost + "/stock/names.raw";
-  http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
-  if (!http.begin(client, url)) return false;
-  int code = http.GET();
-  if (code != HTTP_CODE_OK) {
-    http.end();
-    return false;
-  }
-  WiFiClient *stream = http.getStreamPtr();
-  uint8_t cnt = 0;
-  if (stream->readBytes(&cnt, 1) != 1) {
-    http.end();
-    return false;
-  }
-  const size_t rowBytes = (size_t)STOCK_NAME_W * 2;
-  bool ok = true;
-  for (int i = 0; i < cnt && ok; i++) {
-    int y0 = 10 + i * 54;
-    for (int r = 0; r < STOCK_NAME_H; r++) {
-      if (stream->readBytes((uint8_t *)rowBuf, rowBytes) != (int)rowBytes) {
-        ok = false;
-        break;
-      }
-      if (i < stockCount) tft.pushImage(70, y0 + r, STOCK_NAME_W, 1, rowBuf);
-      yield();
-    }
-  }
-  http.end();
-  return ok;
-}
-
-void pollStock() {
-  if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return;
-  WiFiClient client;
-  HTTPClient http;
-  String url = "http://" + bridgeHost + "/stock";
-  http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
-  if (!http.begin(client, url)) return;
-  int code = http.GET();
-  if (code == HTTP_CODE_OK) handleStockPayload(http.getString());
-  http.end();
-}
-
-// 54px per row: small grey code on top, big font-4 price (white) on the left
-// and change% on the right - red rising / green falling (CN convention).
-// Rows repaint only when their text changes, same trick as everywhere else.
-void drawStockScreen() {
-  if (!stockChromeDrawn) {
-    tft.fillScreen(TFT_BLACK);
-    stockChromeDrawn = true;
-    for (int i = 0; i < MAX_STOCKS; i++) {
-      stockLastCode[i] = "\x01"; // force repaint
-      stockLastVal[i] = "\x01";
-    }
-    stockNamesDrawnRev = -1;
-    tft.setTextDatum(TC_DATUM);
-    tft.setTextColor(0x7BEF, TFT_BLACK);
-    tft.drawString("STOCKS", SCREEN_CX, 228, 1);
-  }
-  stockDirty = false;
-
-  if (stockCount == 0) {
-    if (stockLastCode[0] != "") {
-      for (int i = 0; i < MAX_STOCKS; i++) {
-        stockLastCode[i] = "";
-        stockLastVal[i] = "";
-      }
-      tft.fillRect(0, 0, SCREEN_W, 226, TFT_BLACK);
-      tft.setTextDatum(TC_DATUM);
-      tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-      tft.drawString(stockEverLoaded ? "No stocks configured" : "Waiting for bridge...", SCREEN_CX, 100, 2);
-      if (stockEverLoaded) tft.drawString("Mac menu: Set watchlist", SCREEN_CX, 124, 2);
-    }
-    return;
-  }
-
-  for (int i = 0; i < MAX_STOCKS; i++) {
-    int y0 = 10 + i * 54;
-    bool has = i < stockCount;
-    // top line (code + name strip) and value line refresh independently, so
-    // a price tick never wipes the name bitmap
-    String codeKey = has ? stocks[i].code : "";
-    if (codeKey != stockLastCode[i]) {
-      stockLastCode[i] = codeKey;
-      tft.fillRect(0, y0, SCREEN_W, 17, TFT_BLACK);
-      stockNamesDrawnRev = -1; // strip area wiped: re-fetch names
-      if (has) {
-        tft.setTextDatum(TL_DATUM);
-        tft.setTextColor(0x7BEF, TFT_BLACK);
-        tft.drawString(stocks[i].code, 14, y0, 2);
-      }
-    }
-    String valKey = has ? stocks[i].price + "|" + stocks[i].pct + "|" + String(stocks[i].up) : "";
-    if (valKey != stockLastVal[i]) {
-      stockLastVal[i] = valKey;
-      tft.fillRect(0, y0 + 18, SCREEN_W, 36, TFT_BLACK); // value line + inter-row gap
-      if (has) {
-        tft.setTextDatum(TL_DATUM);
-        tft.setTextColor(TFT_WHITE, TFT_BLACK);
-        tft.drawString(stocks[i].price, 14, y0 + 18, 4);
-        uint16_t pc = stocks[i].up > 0 ? TFT_RED : (stocks[i].up < 0 ? TFT_GREEN : TFT_LIGHTGREY);
-        tft.setTextDatum(TR_DATUM);
-        tft.setTextColor(pc, TFT_BLACK);
-        tft.drawString(stocks[i].pct, 226, y0 + 18, 4);
-      }
-    }
-  }
-
-  // CJK name strips, re-fetched when the watchlist (names_rev) changes
-  if (stockNamesRev >= 0 && stockNamesDrawnRev != stockNamesRev) {
-    if (drawStockNames()) stockNamesDrawnRev = stockNamesRev;
+  if (deserializeJson(doc, json)) return;
+  if (effectiveMode() != MODE_MUSIC || !musicChromeDrawn) return;
+  String kind = doc["k"] | "";
+  int rev = doc["rev"] | -2;
+  int row = doc["row"] | -1;
+  const char *data = doc["d"] | "";
+  bool cover = kind == "cover";
+  if (!cover && kind != "text") return;
+  if (rev != (cover ? musicArtworkRev : musicTextRev)) return;
+  int w = cover ? MUSIC_COVER_W : MUSIC_TEXT_W;
+  int h = cover ? MUSIC_COVER_H : MUSIC_TEXT_H;
+  int x = cover ? (SCREEN_W - MUSIC_COVER_W) / 2 : MUSIC_TEXT_X;
+  int y = cover ? 14 : MUSIC_TEXT_Y;
+  int rowBytes = w * 2; // largest row (text) is 464 bytes, rowBuf holds 480
+  if (row < 0) return;
+  const char *p = data;
+  for (int r = row; *p && r < h; r++) {
+    const char *end = p;
+    int n = b64Decode(p, (uint8_t *)rowBuf, sizeof(rowBuf), &end);
+    if (n != rowBytes) return;
+    tft.pushImage(x, y + r, w, 1, rowBuf);
+    p = *end == ',' ? end + 1 : end;
   }
 }
 
@@ -1601,9 +1565,8 @@ bool parseStatusJson(const String &payload) {
 DisplayMode effectiveMode() {
   if (displayMode == MODE_AUTO) {
     if (claudeStatus.needsInput || codexStatus.needsInput) return MODE_AUTO;
-    // music page needs HTTP for cover/text bitmaps, so don't auto-promote
-    // when running wired-only (no WiFi)
-    if (statusMusicPlaying && WiFi.status() == WL_CONNECTED) return MODE_MUSIC;
+    // cover/text bitmaps come over HTTP, or as #IMG rows on a USB link
+    if (statusMusicPlaying && (WiFi.status() == WL_CONNECTED || wiredActive())) return MODE_MUSIC;
   }
   return displayMode;
 }
@@ -2010,9 +1973,11 @@ void drawPcScreen() {
 // bridge over LAN) - or for skipping WiFi setup entirely: when the clock is
 // plugged into the computer over USB, the bridge pushes the same /status and
 // /net payloads down the CH340 serial line as newline-terminated frames:
-//   bridge -> device:  #HELLO   #STATUS {json}   #NET {json}   #STOCK {json}
+//   bridge -> device:  #HELLO   #STATUS {json}   #NET {json}
 //                      #PC {json}   #WEATHER {json}   #TIME {"epoch":N}   #CMD {json}
-//   device -> bridge:  #DEVICE {"name":"aiclock","fw":"x.y.z"}
+//                      #MUSIC {json}   #IMG {"k","rev","row","d"}
+//   device -> bridge:  #DEVICE {"name":"aiclock","fw":"x.y.z"}   #INFO {json}
+//                      #NEED {"k","rev"}   #SPR {"slot","rev","total","off","d"}
 // Everything else the device prints (logs) is ignored by the bridge.
 unsigned long lastSerialFrameMs = 0;
 bool wiredEverLinked = false;
@@ -2108,7 +2073,7 @@ static void holoHeader(const char *name, const String &status, bool needsInput, 
 
 void drawHoloAi() {
   tft.fillScreen(TFT_BLACK);
-  // 音樂／股票頁會改對齊方式；每次進入 Holo 都重設，避免標題被裁切。
+  // 音樂頁會改對齊方式；每次進入 Holo 都重設，避免標題被裁切。
   tft.setTextDatum(TL_DATUM);
   const uint16_t cyan = tft.color565(88, 220, 222);
   holoText("HOLO / AI MONITOR", 14, 8, cyan, 2);
@@ -2167,10 +2132,6 @@ void handleSerialFrame(char *line) {
     handleNetPayload(String(line + 5));
     return;
   }
-  if (!strncmp(line, "#STOCK ", 7)) {
-    handleStockPayload(String(line + 7));
-    return;
-  }
   if (!strncmp(line, "#TIME ", 6)) {
     JsonDocument doc;
     if (deserializeJson(doc, line + 6)) return;
@@ -2182,6 +2143,17 @@ void handleSerialFrame(char *line) {
       weatherSerialSeen = true;
       weatherSerialMs = millis();
     }
+    return;
+  }
+  if (!strncmp(line, "#MUSIC ", 7)) {
+    if (handleMusicPayload(String(line + 7), effectiveMode() == MODE_MUSIC)) {
+      musicSerialSeen = true;
+      musicSerialMs = millis();
+    }
+    return;
+  }
+  if (!strncmp(line, "#IMG ", 5)) {
+    handleImageFrame(line + 5);
     return;
   }
   if (!strncmp(line, "#PC ", 4)) {
@@ -2210,11 +2182,20 @@ void handleSerialFrame(char *line) {
       else if (m == "weather") displayMode = MODE_WEATHER;
       else if (m == "net") displayMode = MODE_NET;
       else if (m == "music") displayMode = MODE_MUSIC;
-      else if (m == "stock") displayMode = MODE_STOCK;
       else if (m == "holo_ai") displayMode = MODE_HOLO_AI;
       else if (m == "pc") displayMode = MODE_PC;
       // the effectiveMode transition handler in loop() repaints the chrome
     }
+    const char *dump = doc["sprite_dump"] | (const char *)nullptr;
+    if (dump) {
+      String slot(dump);
+      if (slot == "claude" || slot == "codex") {
+        spriteDumpSlot = slot == "claude" ? APP_CLAUDE : APP_CODEX;
+        spriteDumpOffset = 0;
+      }
+    }
+    // USB = physical access: allowed to set or clear the web admin password
+    if (doc["admin_password"].is<const char *>()) saveAdminPassword(doc["admin_password"].as<const char *>());
     if (doc["mirror"].is<bool>()) {
       mirrorHorizontal = doc["mirror"].as<bool>();
       applyHorizontalMirror();
@@ -2255,7 +2236,20 @@ String htmlEscape(const String &s) {
   return out;
 }
 
+bool adminAuthorized() {
+  return adminPassword.length() == 0 || webServer.authenticate("admin", adminPassword.c_str());
+}
+
+// Gate for every page/endpoint that changes the device. Sends the browser's
+// Basic-auth prompt (user "admin") when the password is set and missing/wrong.
+bool requireAdmin() {
+  if (adminAuthorized()) return true;
+  webServer.requestAuthentication(BASIC_AUTH, "AI Clock");
+  return false;
+}
+
 void handleRoot() {
+  if (!requireAdmin()) return;
   String age = everPolled ? String((millis() - lastSuccessMs) / 1000) + "s ago" : "never";
   String html;
   html.reserve(3072);
@@ -2315,6 +2309,14 @@ void handleRoot() {
                                         : "5h ?") + "</td></tr>";
   html += "</table>";
 
+  html += "<h2 style='font-size:16px;margin-top:28px'>管理密码</h2>";
+  html += "<p style='font-size:13px;color:#555'>设置后，打开此页面和电脑端切换屏幕、亮度、上传桌宠都需要密码"
+          "（用户名 admin）。留空保存 = 取消密码。忘记密码可在电脑端经 USB 清除。当前：";
+  html += adminPassword.length() ? "已设置" : "未设置";
+  html += "</p><form method='POST' action='/api/password'><input type='hidden' name='from' value='web'>";
+  html += "<input type='password' name='password' autocomplete='new-password' placeholder='新密码（留空 = 取消）'>";
+  html += "<button type='submit'>保存密码</button></form>";
+
   html += "<form method='POST' action='/reset-wifi' onsubmit=\"return confirm('清除 WiFi "
           "设置并重启？设备会开启配网热点。');\">";
   html += "<button type='submit' style='background:#dc2626'>重置 WiFi</button>";
@@ -2325,6 +2327,7 @@ void handleRoot() {
 }
 
 void handleSave() {
+  if (!requireAdmin()) return;
   String newHost = webServer.arg("bridge");
   newHost.trim();
   bridgeHost = newHost;
@@ -2343,13 +2346,12 @@ const char *displayModeName(DisplayMode m) {
   if (m == MODE_WEATHER) return "weather";
   if (m == MODE_NET) return "net";
   if (m == MODE_MUSIC) return "music";
-  if (m == MODE_STOCK) return "stock";
   if (m == MODE_HOLO_AI) return "holo_ai";
   if (m == MODE_PC) return "pc";
   return "auto";
 }
 
-void handleApiInfo() {
+void buildInfoJson(String &out) {
   JsonDocument doc;
   doc["ip"] = WiFi.localIP().toString();
   doc["ssid"] = WiFi.SSID();
@@ -2376,12 +2378,74 @@ void handleApiInfo() {
   x["custom_sprite"] = codexCustom;
   x["w"] = CODEX_SPRITE_W;
   x["h"] = CODEX_SPRITE_H;
-  String out;
   serializeJson(doc, out);
+}
+
+void handleApiInfo() {
+  String out;
+  buildInfoJson(out);
   webServer.send(200, "application/json", out);
 }
 
+// ---------- wired-only extras: #INFO heartbeat and #SPR sprite dump ----------
+// Without WiFi the bridge cannot GET /api/info or /sprite/*/raw, so the clock
+// pushes its info every 2s and streams a sprite on request (#CMD sprite_dump)
+// as base64 chunks, one per loop pass so animation and serial RX keep going.
+unsigned long lastInfoPushMs = 0;
+unsigned long lastSpriteChunkMs = 0;
+const size_t SPRITE_CHUNK_BYTES = 384; // -> 512 base64 chars per #SPR line
+
+void pushInfoIfWired(unsigned long nowMs) {
+  if (!wiredActive() || nowMs - lastInfoPushMs < 2000UL) return;
+  lastInfoPushMs = nowMs;
+  String out;
+  buildInfoJson(out);
+  Serial.print("#INFO ");
+  Serial.println(out);
+}
+
+void pumpSpriteDump(unsigned long nowMs) {
+  if (spriteDumpSlot < 0 || nowMs - lastSpriteChunkMs < 60UL) return;
+  lastSpriteChunkMs = nowMs;
+  bool claude = spriteDumpSlot == APP_CLAUDE;
+  bool custom = claude ? claudeCustom : codexCustom;
+  int frames = claude ? claudeFrameCount() : codexFrameCount();
+  size_t frameBytes = claude ? CLAUDE_FRAME_BYTES : CODEX_FRAME_BYTES;
+  size_t total = 1 + (size_t)frames * frameBytes; // same layout as /sprite/*/raw
+  uint8_t raw[SPRITE_CHUNK_BYTES];                // on the stack only while sending
+  char enc[SPRITE_CHUNK_BYTES / 3 * 4 + 8];
+  size_t n = min(SPRITE_CHUNK_BYTES, total - spriteDumpOffset);
+  if (custom) {
+    File f = LittleFS.open(claude ? CLAUDE_SPRITE_FILE : CODEX_SPRITE_FILE, "r");
+    if (!f) {
+      spriteDumpSlot = -1;
+      return;
+    }
+    f.seek(spriteDumpOffset);
+    n = f.read(raw, n);
+    f.close();
+  } else {
+    const uint16_t *const *arr = claude ? claude_sprite_frames : codex_sprite_frames;
+    for (size_t i = 0; i < n; i++) {
+      size_t off = spriteDumpOffset + i;
+      if (off == 0) {
+        raw[i] = (uint8_t)frames;
+        continue;
+      }
+      size_t inFrame = off - 1;
+      const uint8_t *frame = (const uint8_t *)arr[inFrame / frameBytes];
+      raw[i] = pgm_read_byte(frame + inFrame % frameBytes);
+    }
+  }
+  b64Encode(raw, (int)n, enc);
+  Serial.printf("#SPR {\"slot\":\"%s\",\"rev\":%u,\"total\":%u,\"off\":%u,\"d\":\"%s\"}\n",
+                claude ? "claude" : "codex", spriteRev, (unsigned)total, (unsigned)spriteDumpOffset, enc);
+  spriteDumpOffset += n;
+  if (n == 0 || spriteDumpOffset >= total) spriteDumpSlot = -1;
+}
+
 void handleApiDisplay() {
+  if (!requireAdmin()) return;
   String mode = webServer.arg("mode");
   if (mode == "auto") displayMode = MODE_AUTO;
   else if (mode == "claude") displayMode = MODE_CLAUDE;
@@ -2390,11 +2454,10 @@ void handleApiDisplay() {
   else if (mode == "weather") displayMode = MODE_WEATHER;
   else if (mode == "net") displayMode = MODE_NET;
   else if (mode == "music") displayMode = MODE_MUSIC;
-  else if (mode == "stock") displayMode = MODE_STOCK;
   else if (mode == "holo_ai") displayMode = MODE_HOLO_AI;
   else if (mode == "pc") displayMode = MODE_PC;
   else {
-    webServer.send(400, "text/plain", "mode must be auto|claude|codex|clock|weather|net|music|stock|holo_ai|pc");
+    webServer.send(400, "text/plain", "mode must be auto|claude|codex|clock|weather|net|music|holo_ai|pc");
     return;
   }
   Serial.printf("[api] display mode = %s\n", mode.c_str());
@@ -2403,6 +2466,7 @@ void handleApiDisplay() {
 }
 
 void handleApiBrightness() {
+  if (!requireAdmin()) return;
   String levelArg = webServer.arg("level");
   if (levelArg.length() == 0) {
     webServer.send(400, "text/plain", "missing level (0-100)");
@@ -2419,6 +2483,7 @@ void handleApiBrightness() {
 }
 
 void handleApiMirror() {
+  if (!requireAdmin()) return;
   if (!webServer.hasArg("enabled")) {
     webServer.send(400, "text/plain", "missing enabled (0|1)");
     return;
@@ -2431,6 +2496,7 @@ void handleApiMirror() {
 }
 
 void handleApiBridge() {
+  if (!requireAdmin()) return;
   String newHost = webServer.arg("host");
   newHost.trim();
   if (newHost.length() == 0) {
@@ -2475,6 +2541,7 @@ void handleSpriteRaw(ActiveApp slot) {
 
 // Removes a custom sprite so the compiled-in default animation comes back.
 void handleSpriteReset(ActiveApp slot) {
+  if (!requireAdmin()) return;
   const char *binPath = (slot == APP_CLAUDE) ? CLAUDE_SPRITE_FILE : CODEX_SPRITE_FILE;
   LittleFS.remove(binPath);
   spriteRev++;
@@ -2486,7 +2553,22 @@ void handleSpriteReset(ActiveApp slot) {
   webServer.send(200, "text/plain", "ok");
 }
 
+void handleApiPassword() {
+  if (!requireAdmin()) return;
+  saveAdminPassword(webServer.arg("password"));
+  Serial.printf("[api] admin password %s\n", adminPassword.length() ? "set" : "cleared");
+  // the web form gets redirected back (the browser re-prompts with the new
+  // password); API callers (bridges) just get 200
+  if (webServer.arg("from") == "web") {
+    webServer.sendHeader("Location", "/");
+    webServer.send(303);
+  } else {
+    webServer.send(200, "text/plain", "ok");
+  }
+}
+
 void handleResetWifi() {
+  if (!requireAdmin()) return;
   webServer.send(200, "text/html", "<html><body>Resetting WiFi, device will restart...</body></html>");
   delay(200);
   WiFiManager wm;
@@ -2684,11 +2766,14 @@ bool decodeGifToBin(const char *gifPath, const char *binPath, int targetW, int t
 // upload over its streaming multipart/HTTPUpload path, writing the raw .gif to
 // LittleFS in small chunks, then decode it on the done callback.
 File uploadFile;
+bool uploadAuthorized = false;
 
 void handleSpriteUploadChunk(const char *gifPath) {
   HTTPUpload &upload = webServer.upload();
   if (upload.status == UPLOAD_FILE_START) {
-    uploadFile = LittleFS.open(gifPath, "w");
+    // unauthorized uploads are drained without touching LittleFS
+    uploadAuthorized = adminAuthorized();
+    if (uploadAuthorized) uploadFile = LittleFS.open(gifPath, "w");
   } else if (upload.status == UPLOAD_FILE_WRITE) {
     if (uploadFile) uploadFile.write(upload.buf, upload.currentSize);
   } else if (upload.status == UPLOAD_FILE_END || upload.status == UPLOAD_FILE_ABORTED) {
@@ -2697,6 +2782,11 @@ void handleSpriteUploadChunk(const char *gifPath) {
 }
 
 void handleSpriteUploadDone(ActiveApp slot) {
+  if (!uploadAuthorized) {
+    webServer.requestAuthentication(BASIC_AUTH, "AI Clock");
+    return;
+  }
+  uploadAuthorized = false;
   const char *gifPath = (slot == APP_CLAUDE) ? CLAUDE_GIF_FILE : CODEX_GIF_FILE;
   const char *binPath = (slot == APP_CLAUDE) ? CLAUDE_SPRITE_FILE : CODEX_SPRITE_FILE;
   int tw = (slot == APP_CLAUDE) ? CLAUDE_SPRITE_W : CODEX_SPRITE_W;
@@ -2730,6 +2820,7 @@ void setupWebServer() {
   webServer.on("/api/bridge", HTTP_POST, handleApiBridge);
   webServer.on("/api/brightness", HTTP_POST, handleApiBrightness);
   webServer.on("/api/mirror", HTTP_POST, handleApiMirror);
+  webServer.on("/api/password", HTTP_POST, handleApiPassword);
   webServer.on("/sprite/claude/reset", HTTP_POST, []() { handleSpriteReset(APP_CLAUDE); });
   webServer.on("/sprite/codex/reset", HTTP_POST, []() { handleSpriteReset(APP_CODEX); });
   webServer.on("/sprite/claude/raw", HTTP_GET, []() { handleSpriteRaw(APP_CLAUDE); });
@@ -2752,6 +2843,7 @@ void setup() {
   LittleFS.begin();
   loadBridgeHost();
   loadBrightness();
+  loadAdminPassword();
   loadHorizontalMirror();
   loadCustomSpriteState();
 
@@ -2789,6 +2881,8 @@ void setup() {
 void loop() {
   wifiManager.process(); // keeps the config portal alive until WiFi is set up
   pumpSerial();          // wired (USB) bridge frames
+  pushInfoIfWired(millis());
+  pumpSpriteDump(millis());
 
   if (!webServerStarted && WiFi.status() == WL_CONNECTED) {
     // WiFi came up after boot (portal or slow AP); the portal has released
@@ -2830,9 +2924,6 @@ void loop() {
     } else if (eff == MODE_MUSIC) {
       musicChromeDrawn = false;
       lastMusicPollMs = 0;
-    } else if (eff == MODE_STOCK) {
-      stockChromeDrawn = false;
-      lastStockPollMs = 0;
     } else {
       updateActiveApp();
       drawActiveApp();
@@ -2885,15 +2976,9 @@ void loop() {
     // music now-playing mode: cover art + track metadata from the bridge
     if (nowMs - lastMusicPollMs >= MUSIC_POLL_INTERVAL_MS) {
       lastMusicPollMs = nowMs;
-      pollMusic();
+      // #MUSIC frames (1s) drive the page while the USB bridge is pushing them
+      if (!musicSerialSeen || nowMs - musicSerialMs > 5000UL) pollMusic();
     }
-  } else if (eff == MODE_STOCK) {
-    // stock watchlist: HTTP poll unless the serial link is pushing #STOCK
-    if (nowMs - lastStockPollMs >= STOCK_POLL_INTERVAL_MS) {
-      lastStockPollMs = nowMs;
-      if (!wiredActive()) pollStock();
-    }
-    if (!stockChromeDrawn || stockDirty) drawStockScreen();
   } else {
     // sprite walk-cycle animation (only advances while that app is showing)
     if (nowMs - lastAnimMs >= ANIM_INTERVAL_MS) {

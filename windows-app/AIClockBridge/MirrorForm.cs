@@ -40,9 +40,6 @@ sealed class MirrorControl : Control
     double[] _histRx = new double[NetCols];
     double[] _histTx = new double[NetCols];
 
-    public bool StockMode;
-    public StockMonitor.Row[] StockRows = Array.Empty<StockMonitor.Row>();
-
     public bool MusicMode;
     public bool HoloMode;
     public bool PcMode;
@@ -155,11 +152,6 @@ sealed class MirrorControl : Control
         if (MusicMode)
         {
             DrawMusicScene(g);
-            return;
-        }
-        if (StockMode)
-        {
-            DrawStockScene(g);
             return;
         }
 
@@ -326,38 +318,6 @@ sealed class MirrorControl : Control
         }
     }
 
-    // Stock watchlist, same 54px rows as the firmware: grey code (the mirror
-    // can render the CJK name next to it), big white price, colored change.
-    void DrawStockScene(Graphics g)
-    {
-        using var greyBrush = new SolidBrush(Color.FromArgb(140, 140, 140));
-        using var codeFont = new Font("Microsoft YaHei UI", 7.5f);
-        using var valueFont = new Font("Consolas", 13f, FontStyle.Bold);
-        using var labelFont = new Font("Consolas", 6.5f);
-        if (StockRows.Length == 0)
-        {
-            using var center0 = new StringFormat { Alignment = StringAlignment.Center };
-            using var hintFont = new Font("Microsoft YaHei UI", 8.5f);
-            g.DrawString("未配置自选股\n右键托盘 → 设置自选股…", hintFont, greyBrush,
-                         new RectangleF(0, 104, 240, 40), center0);
-            return;
-        }
-        for (int i = 0; i < Math.Min(StockRows.Length, 4); i++)
-        {
-            var row = StockRows[i];
-            float y0 = 10 + i * 54;
-            var label = row.Name.Length == 0 ? row.Code : $"{row.Code}  {row.Name}";
-            g.DrawString(label, codeFont, greyBrush, 14, y0);
-            g.DrawString(row.Price, valueFont, Brushes.White, 12, y0 + 16);
-            using var pctBrush = new SolidBrush(row.Up > 0 ? Color.FromArgb(255, 59, 48)
-                : (row.Up < 0 ? Green : Color.LightGray));
-            using var right = new StringFormat { Alignment = StringAlignment.Far };
-            g.DrawString(row.Pct, valueFont, pctBrush, new RectangleF(120, y0 + 16, 106, 22), right);
-        }
-        using var center = new StringFormat { Alignment = StringAlignment.Center };
-        g.DrawString("STOCKS", labelFont, greyBrush, new RectangleF(0, 226, 240, 12), center);
-    }
-
     /// Same compact unit strings the firmware prints ("2.3M", "480K").
     public static string DeviceSpeedText(double bps)
     {
@@ -387,13 +347,12 @@ sealed class MirrorForm : Form
     readonly NetSpeedMonitor _netMonitor;
     readonly NowPlayingMonitor _nowPlaying;
     readonly AudioSpectrumMonitor _spectrum;
-    readonly StockMonitor _stockMonitor;
     readonly PcMonitor _pcMonitor;
     readonly WeatherMonitor _weather;
     readonly MirrorControl _mirror = new();
     readonly RadioButton[] _modeButtons;
-    static readonly string[] Modes = { "auto", "claude", "codex", "clock", "weather", "net", "music", "stock", "holo_ai", "pc" };
-    static readonly string[] ModeLabels = { "自动", "Claude", "Codex", "时钟", "天气", "网速", "音乐", "股票", "Holo AI", "PC" };
+    static readonly string[] Modes = { "auto", "claude", "codex", "clock", "weather", "net", "music", "holo_ai", "pc" };
+    static readonly string[] ModeLabels = { "自动", "Claude", "Codex", "时钟", "天气", "网速", "音乐", "Holo AI", "PC" };
     readonly Label _statusLabel = new();
     readonly TrackBar _brightness = new() { Minimum = 0, Maximum = 100, TickStyle = TickStyle.None };
     readonly Label _brightnessValue = new();
@@ -415,14 +374,13 @@ sealed class MirrorForm : Form
     bool _applyingMode; // suppress CheckedChanged while reflecting device state
 
     public MirrorForm(StatusService service, NetSpeedMonitor netMonitor, NowPlayingMonitor nowPlaying,
-                      AudioSpectrumMonitor spectrum, StockMonitor stockMonitor, PcMonitor pcMonitor,
+                      AudioSpectrumMonitor spectrum, PcMonitor pcMonitor,
                       WeatherMonitor weather)
     {
         _service = service;
         _netMonitor = netMonitor;
         _nowPlaying = nowPlaying;
         _spectrum = spectrum;
-        _stockMonitor = stockMonitor;
         _pcMonitor = pcMonitor;
         _weather = weather;
 
@@ -617,9 +575,10 @@ sealed class MirrorForm : Form
             : info.Mode == "pc" ? "PC 监控"
             : info.Mode == "clock" ? "时钟"
             : info.Mode == "weather" ? "天气"
-            : info.Mode == "stock" ? "股票行情"
             : info.Mode == "music" ? "音乐播放" : "固定显示";
-        _statusLabel.Text = $"{info.Ip} · {modeText} · 数据 {info.Bridge}";
+        _statusLabel.Text = info.ViaUsb
+            ? $"USB 有线 {SerialLink.Current?.PortName} · {modeText}"
+            : $"{info.Ip} · {modeText} · 数据 {info.Bridge}";
     }
 
     /// Quota lines & ring exactly as the firmware computes them from /status.
@@ -630,7 +589,6 @@ sealed class MirrorForm : Form
         var enteringNet = info.Effective == "net" && !_mirror.NetMode;
         _mirror.NetMode = info.Effective == "net";
         _mirror.MusicMode = info.Effective == "music";
-        _mirror.StockMode = info.Effective == "stock";
         _mirror.HoloMode = info.Effective == "holo_ai";
         _mirror.PcMode = info.Effective == "pc";
         _mirror.ClockMode = info.Effective == "clock";
@@ -666,12 +624,6 @@ sealed class MirrorForm : Form
                 c.SevenDayPct, c.SevenDayResetMin);
             _mirror.HoloCodex = new(x.Status, x.NeedsInput, x.PrimaryPct, x.PrimaryResetMin,
                 x.WeeklyPct, x.WeeklyResetMin);
-            _mirror.Invalidate();
-            return;
-        }
-        if (_mirror.StockMode)
-        {
-            _mirror.StockRows = _stockMonitor.Snapshot;
             _mirror.Invalidate();
             return;
         }
@@ -753,7 +705,7 @@ sealed class MirrorForm : Form
             }
             return;
         }
-        if (info.Effective is "clock" or "weather" or "pc" or "net" or "music" or "stock") return;
+        if (info.Effective is "clock" or "weather" or "pc" or "net" or "music") return;
         var slot = info.Showing == "codex" ? "codex" : "claude";
         var w = slot == "claude" ? info.ClaudeW : info.CodexW;
         var h = slot == "claude" ? info.ClaudeH : info.CodexH;
@@ -827,7 +779,7 @@ sealed class MirrorForm : Form
             if (changed) _mirror.Invalidate();
             return;
         }
-        if (_mirror.ClockMode || _mirror.WeatherMode || _mirror.PcMode || _mirror.NetMode || _mirror.MusicMode || _mirror.StockMode) return;
+        if (_mirror.ClockMode || _mirror.WeatherMode || _mirror.PcMode || _mirror.NetMode || _mirror.MusicMode) return;
 
         // ~400ms red-border flash while an approval is pending (device cadence)
         if (_mirror.NeedsInput)

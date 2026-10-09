@@ -52,8 +52,6 @@ static class Program
         using var spectrum = new AudioSpectrumMonitor();
         spectrum.Start();
         service.MusicPlayingProvider = () => nowPlaying.Snapshot.Playing;
-        var stockMonitor = new StockMonitor();
-        stockMonitor.Start();
 
         using var server = new MiniHttpServer(Port,
             routes: new()
@@ -63,14 +61,12 @@ static class Program
                 ["/net"] = () => netMonitor.ToJson(SystemStatsMonitor.Snapshot()),
                 ["/music"] = () => nowPlaying.ToJson(spectrum.Levels),
                 ["/weather"] = () => weather.ToJson(),
-                ["/stock"] = () => stockMonitor.ToJson(),
                 ["/pc"] = () => pcMonitor.Snapshot().ToJson(),
             },
             binaryRoutes: new()
             {
                 ["/music/cover.raw"] = () => nowPlaying.CoverRgb565,
                 ["/music/text.raw"] = () => nowPlaying.TextRgb565,
-                ["/stock/names.raw"] = () => stockMonitor.NamesRgb565,
             },
             postRoutes: new()
             {
@@ -136,16 +132,16 @@ static class Program
         // a wired-only clock also gets its time and weather this way).
         var feeds = new SerialFrameScheduler();
         feeds.Add("STATUS", TimeSpan.FromSeconds(5), () => SerialProtocol.Frame("STATUS", service.Snapshot().ToJson()));
-        feeds.Add("STOCK", TimeSpan.FromSeconds(5), () => SerialProtocol.Frame("STOCK", stockMonitor.ToJson(maxRows: 4)));
         feeds.Add("NET", TimeSpan.FromSeconds(2), () => SerialProtocol.Frame("NET", netMonitor.ToJson(SystemStatsMonitor.Snapshot())));
         feeds.Add("PC", TimeSpan.FromSeconds(1), () => SerialProtocol.Frame("PC", pcMonitor.Snapshot().ToJson()));
         feeds.Add("WEATHER", TimeSpan.FromMinutes(1), () => SerialProtocol.Frame("WEATHER", weather.ToJson()));
         feeds.Add("TIME", TimeSpan.FromMinutes(1), () => SerialProtocol.Time(DateTimeOffset.UtcNow));
-        using var serialLink = new SerialLink(feeds);
+        feeds.Add("MUSIC", TimeSpan.FromSeconds(1), () => SerialProtocol.Frame("MUSIC", nowPlaying.ToJson(spectrum.Levels, maxText: 32)));
+        using var serialLink = new SerialLink(feeds) { ImageSource = nowPlaying.SerialImage };
         serialLink.Start();
 
         var context = new TrayAppContext(service, usage, netMonitor, nowPlaying, spectrum,
-            stockMonitor, pcMonitor, weather, Port);
+            pcMonitor, weather, Port);
         usage.StartAutoRefresh();
         Application.Run(context);
     }

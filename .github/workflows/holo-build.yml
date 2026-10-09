@@ -7,6 +7,7 @@ on:
     paths:
       - 'firmware/**'
       - 'windows-app/**'
+      - 'mac-app/**'
       - '.github/workflows/holo-build.yml'
   workflow_dispatch:
 
@@ -28,6 +29,13 @@ jobs:
           name: nodemcuv2-firmware
           path: firmware/.pio/build/nodemcuv2/firmware.bin
           if-no-files-found: error
+
+  mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift build --package-path mac-app -c release
+      - run: swift test --package-path mac-app
 
   windows:
     runs-on: windows-latest

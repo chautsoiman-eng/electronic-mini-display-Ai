@@ -7,8 +7,10 @@ namespace AIClockBridge;
 // mac-app/SerialLink.swift. For WiFi networks with client isolation, or for
 // skipping WiFi setup entirely: finds the NodeMCU's CH340/CP210x COM port,
 // handshakes (#HELLO -> #DEVICE), then pushes the payloads the device would
-// otherwise poll over HTTP (see SerialProtocol for the frame list). Device
-// log lines are ignored.
+// otherwise poll over HTTP (see SerialProtocol for the frame list). With no
+// WiFi at all, the clock's #INFO heartbeat, #NEED image requests and #SPR
+// sprite dumps keep the tray, mirror and music page working. Device log
+// lines are ignored.
 //
 // NOTE: Windows opens COM ports exclusively — quit the bridge before flashing
 // with PlatformIO/esptool, or the upload cannot open the port.
@@ -17,7 +19,11 @@ sealed class SerialLink : IDisposable
     /// The running link, for DeviceClient's wired control fallback.
     public static SerialLink Current { get; private set; }
 
-    static readonly TimeSpan Tick = TimeSpan.FromMilliseconds(250);
+    // One frame per tick at most: feeds when due, otherwise one queued #IMG
+    // chunk (~1.2 KB), which keeps the line below ~80% of 115200 baud so the
+    // ESP8266's 2 KB RX buffer survives a slow screen draw.
+    static readonly TimeSpan Tick = TimeSpan.FromMilliseconds(125);
+    static readonly TimeSpan InfoFreshFor = TimeSpan.FromSeconds(6);
     static readonly TimeSpan HelloEvery = TimeSpan.FromSeconds(3);
     static readonly TimeSpan HandshakeTimeout = TimeSpan.FromSeconds(30);
     static readonly TimeSpan RescanEvery = TimeSpan.FromSeconds(5);
@@ -34,6 +40,18 @@ sealed class SerialLink : IDisposable
     volatile bool _linked;
     volatile string _portName = "";
     volatile string _firmware = "";
+
+    // wired-only extras
+    readonly object _extrasLock = new();
+    readonly List<(string Kind, byte[] Frame)> _bulk = new();
+    string _infoJson;
+    DateTime _infoAt = DateTime.MinValue;
+    string _spriteSlot;
+    SpriteAssembler _assembler;
+    TaskCompletionSource<byte[]> _spriteTcs;
+
+    /// Current music bitmap for #NEED: ("cover"|"text") -> (rev, RGB565 rows, width).
+    public Func<string, (int Rev, byte[] Data, int Width)> ImageSource;
 
     public SerialLink(SerialFrameScheduler scheduler)
     {
@@ -56,6 +74,105 @@ sealed class SerialLink : IDisposable
     {
         if (frame == null || !_linked) return false;
         return Write(frame);
+    }
+
+    /// Latest #INFO JSON (same shape as GET /api/info) while it is fresh.
+    public string LatestInfoJson
+    {
+        get
+        {
+            lock (_extrasLock)
+                return _linked && DateTime.UtcNow - _infoAt < InfoFreshFor ? _infoJson : null;
+        }
+    }
+
+    /// Asks the clock to stream a sprite over USB (#CMD sprite_dump) and
+    /// returns it in the /sprite/*/raw layout, or null on timeout/unplug.
+    /// One transfer at a time; ~15-20 s for the built-in 6-frame sprites.
+    public async Task<byte[]> RequestSpriteAsync(string slot, TimeSpan timeout)
+    {
+        TaskCompletionSource<byte[]> tcs;
+        lock (_extrasLock)
+        {
+            if (_spriteTcs != null) return null; // another dump is running
+            tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _spriteTcs = tcs;
+            _spriteSlot = slot;
+            _assembler = new SpriteAssembler(slot);
+        }
+        try
+        {
+            if (!TrySend(SerialProtocol.Command(spriteDump: slot))) return null;
+            var done = await Task.WhenAny(tcs.Task, Task.Delay(timeout));
+            return done == tcs.Task ? tcs.Task.Result : null;
+        }
+        finally
+        {
+            lock (_extrasLock)
+            {
+                if (_spriteTcs == tcs)
+                {
+                    _spriteTcs = null;
+                    _assembler = null;
+                    _spriteSlot = null;
+                }
+            }
+        }
+    }
+
+    void QueueImage(string kind, int rev)
+    {
+        var source = ImageSource;
+        if (source == null) return;
+        (int Rev, byte[] Data, int Width) img;
+        try
+        {
+            img = source(kind);
+        }
+        catch (Exception)
+        {
+            return;
+        }
+        // the clock drops rows for a stale rev, so always send what we have now
+        var frames = SerialProtocol.ImageFrames(kind, img.Rev, img.Data, img.Width);
+        lock (_extrasLock)
+        {
+            _bulk.RemoveAll(b => b.Kind == kind); // a newer request supersedes
+            foreach (var f in frames) _bulk.Add((kind, f));
+        }
+    }
+
+    void HandleDeviceLine(string line)
+    {
+        var info = SerialProtocol.InfoJson(line);
+        if (info != null)
+        {
+            lock (_extrasLock)
+            {
+                _infoJson = info;
+                _infoAt = DateTime.UtcNow;
+            }
+            return;
+        }
+        if (SerialProtocol.TryParseNeed(line, out var kind, out var rev))
+        {
+            QueueImage(kind, rev);
+            return;
+        }
+        if (line.StartsWith("#SPR ", StringComparison.Ordinal))
+        {
+            TaskCompletionSource<byte[]> tcs = null;
+            byte[] done = null;
+            lock (_extrasLock)
+            {
+                if (_assembler != null)
+                {
+                    done = _assembler.Accept(line);
+                    if (done != null) tcs = _spriteTcs;
+                }
+            }
+            tcs?.TrySetResult(done);
+        }
     }
 
     void Run()
@@ -102,7 +219,21 @@ sealed class SerialLink : IDisposable
             return;
         }
         var next = _scheduler.Next(now);
-        if (next is { Frame: not null } f) Write(f.Frame);
+        if (next is { Frame: not null } f)
+        {
+            Write(f.Frame);
+            return;
+        }
+        byte[] bulk = null;
+        lock (_extrasLock)
+        {
+            if (_bulk.Count > 0)
+            {
+                bulk = _bulk[0].Frame;
+                _bulk.RemoveAt(0);
+            }
+        }
+        if (bulk != null) Write(bulk);
     }
 
     // MARK: - port lifecycle
@@ -182,6 +313,14 @@ sealed class SerialLink : IDisposable
         _linked = false;
         _portName = "";
         _firmware = "";
+        TaskCompletionSource<byte[]> pending;
+        lock (_extrasLock)
+        {
+            _bulk.Clear();
+            _infoJson = null;
+            pending = _spriteTcs;
+        }
+        pending?.TrySetResult(null);
     }
 
     // MARK: - I/O
@@ -235,6 +374,11 @@ sealed class SerialLink : IDisposable
             }
             foreach (var line in _splitter.Push(buf, n))
             {
+                if (_linked && !SerialProtocol.IsDeviceReply(line))
+                {
+                    HandleDeviceLine(line);
+                    continue;
+                }
                 if (!SerialProtocol.IsDeviceReply(line) || _linked) continue;
                 _firmware = SerialProtocol.FirmwareVersion(line);
                 _linked = true;

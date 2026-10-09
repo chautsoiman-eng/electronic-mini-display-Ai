@@ -72,7 +72,8 @@ final class HTTPServer {
                 }
                 let bodyEnd = min(buf.count, range.upperBound + contentLength)
                 let requestBody = buf.subdata(in: range.upperBound..<bodyEnd)
-                self.respond(conn, method: method, path: path, requestBody: requestBody)
+                self.respond(conn, method: method, path: path, requestBody: requestBody,
+                             headerLines: headerLines.map(String.init))
             } else if isComplete || error != nil {
                 conn.cancel()
             } else {
@@ -81,17 +82,34 @@ final class HTTPServer {
         }
     }
 
-    private func respond(_ conn: NWConnection, method: String, path: String, requestBody: Data) {
+    /// POST routes (Claude Code / Codex hook events) are for this Mac only:
+    /// loopback callers, and never a browser (browsers always send Origin on
+    /// a cross-site POST), so neither the LAN nor a web page can fake events.
+    /// GET routes stay LAN-readable because the clock itself polls them.
+    static func postAllowed(remoteIP: String, headerLines: [String]) -> Bool {
+        let ip = remoteIP.hasPrefix("::ffff:") ? String(remoteIP.dropFirst(7)) : remoteIP
+        guard ip == "127.0.0.1" || ip == "::1" || ip.hasPrefix("127.") else { return false }
+        return !headerLines.contains { $0.lowercased().hasPrefix("origin:") }
+    }
+
+    private func respond(_ conn: NWConnection, method: String, path: String, requestBody: Data,
+                         headerLines: [String]) {
         let clean = path.split(separator: "?").first.map(String.init) ?? path
+        var ip = ""
         if case let .hostPort(host, _) = conn.endpoint {
             // "192.168.1.4%en0" -> "192.168.1.4"
-            let ip = String(host.debugDescription.split(separator: "%").first ?? "")
+            ip = String(host.debugDescription.split(separator: "%").first ?? "")
             if !ip.isEmpty { onRequest?(clean, ip) }
         }
         let body: Data
         let statusLine: String
         let contentType: String
-        if method == "POST", let handler = postRoutes[clean] {
+        if method == "POST", postRoutes[clean] != nil,
+           !Self.postAllowed(remoteIP: ip, headerLines: headerLines) {
+            body = Data("{\"ok\":false,\"error\":\"local only\"}".utf8)
+            statusLine = "403 Forbidden"
+            contentType = "application/json"
+        } else if method == "POST", let handler = postRoutes[clean] {
             body = handler(requestBody)
             statusLine = "200 OK"
             contentType = "application/json"
@@ -111,7 +129,6 @@ final class HTTPServer {
         let header = "HTTP/1.1 \(statusLine)\r\n"
             + "Content-Type: \(contentType)\r\n"
             + "Content-Length: \(body.count)\r\n"
-            + "Access-Control-Allow-Origin: *\r\n"
             + "Connection: close\r\n\r\n"
         var response = Data(header.utf8)
         response.append(body)

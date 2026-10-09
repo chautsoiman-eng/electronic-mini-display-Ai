@@ -26,6 +26,7 @@ class DeviceInfo
     public bool CodexCustomSprite;
     public int ClaudeW = 111, ClaudeH = 120;
     public int CodexW = 120, CodexH = 120;
+    public bool ViaUsb;                // came from the clock's #INFO heartbeat, not HTTP
 }
 
 class DeviceException : Exception
@@ -37,6 +38,7 @@ static class DeviceClient
 {
     const string HostKey = "device_host";
     const string LastSeenKey = "device_last_seen";
+    const string PasswordKey = "device_password";
 
     // per-request CancellationTokenSources carry the timeouts (5s info, 8s
     // posts, 30s sprite pull, 60s GIF upload+on-device decode), so the client
@@ -47,6 +49,32 @@ static class DeviceClient
     {
         get => Settings.Get(HostKey);
         set => Settings.Set(HostKey, value);
+    }
+
+    /// The device's optional web admin password (user "admin"), sent only to
+    /// the configured host on requests that change the device.
+    public static string Password
+    {
+        get => Settings.Get(PasswordKey);
+        set => Settings.Set(PasswordKey, value ?? "");
+    }
+
+    static HttpRequestMessage Authorized(HttpMethod method, Uri url, HttpContent content)
+    {
+        var req = new HttpRequestMessage(method, url) { Content = content };
+        var pass = Password;
+        if (pass.Length > 0)
+            req.Headers.Authorization = new AuthenticationHeaderValue("Basic",
+                Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("admin:" + pass)));
+        return req;
+    }
+
+    /// POST /api/password — sets (or clears, when empty) the device's admin
+    /// password. Over USB it needs no current password (physical access).
+    public static async Task SetDevicePassword(string newPassword)
+    {
+        if (SerialLink.Current?.TrySend(SerialProtocol.Command(adminPassword: newPassword)) == true) return;
+        await PostForm("api/password", new() { ["password"] = newPassword });
     }
 
     /// Last LAN address that polled our /status — i.e. the clock itself.
@@ -73,20 +101,33 @@ static class DeviceClient
         return new Uri(b, path);
     }
 
-    /// GET /api/info
+    /// GET /api/info — or, when HTTP can't reach the clock (no address, no
+    /// WiFi, AP isolation), the same JSON from its USB #INFO heartbeat.
     public static async Task<DeviceInfo> FetchInfo()
     {
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         string body;
         try
         {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             body = await Http.GetStringAsync(Resolve("api/info"), cts.Token);
         }
-        catch (DeviceException) { throw; }
         catch (Exception e)
         {
+            var wired = SerialLink.Current?.LatestInfoJson;
+            if (wired != null)
+            {
+                var info = ParseInfo(wired);
+                info.ViaUsb = true;
+                return info;
+            }
+            if (e is DeviceException) throw;
             throw new DeviceException($"无法连接设备：{e.Message}");
         }
+        return ParseInfo(body);
+    }
+
+    static DeviceInfo ParseInfo(string body)
+    {
         try
         {
             using var doc = JsonDocument.Parse(body);
@@ -124,7 +165,7 @@ static class DeviceClient
         }
     }
 
-    /// POST /api/display  mode=auto|claude|codex|clock|weather|net|music|stock|holo_ai|pc
+    /// POST /api/display  mode=auto|claude|codex|clock|weather|net|music|holo_ai|pc
     public static Task SetDisplayMode(string mode) =>
         WiredFirst(SerialProtocol.Command(display: mode),
             () => PostForm("api/display", new() { ["mode"] = mode }));
@@ -162,10 +203,11 @@ static class DeviceClient
         filePart.Headers.ContentType = new MediaTypeHeaderValue("image/gif");
         content.Add(filePart, "file", "pet.gif");
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60)); // on-device decode
+        using var req = Authorized(HttpMethod.Post, url, content);
         HttpResponseMessage resp;
         try
         {
-            resp = await Http.PostAsync(url, content, cts.Token);
+            resp = await Http.SendAsync(req, cts.Token);
         }
         catch (Exception e)
         {
@@ -181,16 +223,20 @@ static class DeviceClient
     /// using, wire format [1 byte frame count][RGB565 big-endian frames...].
     public static async Task<byte[]> FetchSpriteRaw(string slot)
     {
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         byte[] data;
         try
         {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
             data = await Http.GetByteArrayAsync(Resolve($"sprite/{slot}/raw"), cts.Token);
         }
-        catch (DeviceException) { throw; }
         catch (Exception e)
         {
-            throw new DeviceException($"拉取动画失败：{e.Message}");
+            // no WiFi path: the clock streams the sprite over USB instead
+            var link = SerialLink.Current;
+            data = link is { IsLinked: true }
+                ? await link.RequestSpriteAsync(slot, TimeSpan.FromSeconds(60)) : null;
+            if (data == null)
+                throw e as DeviceException ?? new DeviceException($"拉取动画失败：{e.Message}");
         }
         if (data.Length <= 1) throw new DeviceException("设备响应解析失败");
         return data;
@@ -203,10 +249,11 @@ static class DeviceClient
         var url = Resolve(path);
         using var content = new FormUrlEncodedContent(fields);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        using var req = Authorized(HttpMethod.Post, url, content);
         HttpResponseMessage resp;
         try
         {
-            resp = await Http.PostAsync(url, content, cts.Token);
+            resp = await Http.SendAsync(req, cts.Token);
         }
         catch (Exception e)
         {
@@ -218,6 +265,10 @@ static class DeviceClient
     static async Task ThrowUnlessOk(HttpResponseMessage resp)
     {
         if (resp.IsSuccessStatusCode) return;
+        if (resp.StatusCode == HttpStatusCode.Unauthorized)
+            throw new DeviceException(Password.Length == 0
+                ? "设备已设置管理密码，请右键托盘 → 设备管理密码… 填写"
+                : "设备管理密码不正确，请右键托盘 → 设备管理密码… 重新填写");
         var msg = "";
         try { msg = await resp.Content.ReadAsStringAsync(); } catch { }
         throw new DeviceException($"设备返回 HTTP {(int)resp.StatusCode} {msg}");
