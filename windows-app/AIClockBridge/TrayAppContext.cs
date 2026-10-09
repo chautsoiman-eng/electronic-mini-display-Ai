@@ -17,21 +17,26 @@ sealed class TrayAppContext : ApplicationContext
     readonly PcMonitor _pcMonitor;
     PcPreviewForm _pcPreview;
     ClockPreviewForm _clockPreview;
+    WeatherPreviewForm _weatherPreview;
+    readonly WeatherMonitor _weather;
     readonly ContextMenuStrip _menu = new();
 
     readonly ToolStripMenuItem _claudeUsageItem = new("Claude …") { Enabled = false };
     readonly ToolStripMenuItem _codexUsageItem = new("Codex …") { Enabled = false };
     readonly ToolStripMenuItem _deviceInfoItem = new("设备：未设置") { Enabled = false };
     readonly Dictionary<string, ToolStripMenuItem> _modeItems = new();
+    readonly ToolStripMenuItem _mirrorItem = new("45° 全息水平镜像") { CheckOnClick = true };
 
     public TrayAppContext(StatusService service, UsageFetcher usage, NetSpeedMonitor netMonitor,
-                          NowPlayingMonitor nowPlaying, StockMonitor stockMonitor, PcMonitor pcMonitor, int port)
+                          NowPlayingMonitor nowPlaying, AudioSpectrumMonitor spectrum,
+                          StockMonitor stockMonitor, PcMonitor pcMonitor, WeatherMonitor weather, int port)
     {
         _service = service;
         _usage = usage;
         _port = port;
         _pcMonitor = pcMonitor;
-        _mirror = new MirrorForm(service, netMonitor, nowPlaying, stockMonitor, pcMonitor);
+        _weather = weather;
+        _mirror = new MirrorForm(service, netMonitor, nowPlaying, spectrum, stockMonitor, pcMonitor, weather);
 
         BuildMenu();
         _trayIcon = new NotifyIcon
@@ -84,7 +89,7 @@ sealed class TrayAppContext : ApplicationContext
         {
             ("自动（谁在干活显示谁）", "auto"), ("固定 Claude", "claude"),
             ("固定 Codex", "codex"), ("网速曲线", "net"), ("音乐播放", "music"),
-            ("时钟", "clock"),
+            ("时钟", "clock"), ("天气", "weather"),
             ("股票行情", "stock"),
             ("Holo AI 监控", "holo_ai"),
             ("PC 监控", "pc"),
@@ -96,6 +101,16 @@ sealed class TrayAppContext : ApplicationContext
             displayMenu.DropDownItems.Add(item);
         }
         _menu.Items.Add(displayMenu);
+        _mirrorItem.Click += async (_, _) =>
+        {
+            try { await DeviceClient.SetHorizontalMirror(_mirrorItem.Checked); }
+            catch (Exception e)
+            {
+                _mirrorItem.Checked = !_mirrorItem.Checked;
+                MessageBox.Show(e.Message, "水平镜像", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        };
+        _menu.Items.Add(_mirrorItem);
         _menu.Items.Add(MakeItem("PC 监控（本机预览，无需设备）", (_, _) =>
         {
             if (_pcPreview == null || _pcPreview.IsDisposed) _pcPreview = new PcPreviewForm(_pcMonitor);
@@ -104,10 +119,17 @@ sealed class TrayAppContext : ApplicationContext
         }));
         _menu.Items.Add(MakeItem("时钟（本机预览，无需设备）", (_, _) =>
         {
-            if (_clockPreview == null || _clockPreview.IsDisposed) _clockPreview = new ClockPreviewForm();
+            if (_clockPreview == null || _clockPreview.IsDisposed) _clockPreview = new ClockPreviewForm(_weather);
             _clockPreview.Show();
             _clockPreview.Activate();
         }));
+        _menu.Items.Add(MakeItem("天气（本机预览，无需设备）", (_, _) =>
+        {
+            if (_weatherPreview == null || _weatherPreview.IsDisposed) _weatherPreview = new WeatherPreviewForm(_weather);
+            _weatherPreview.Show();
+            _weatherPreview.Activate();
+        }));
+        _menu.Items.Add(MakeItem("设置天气位置…", (_, _) => SetWeatherLocation()));
         // (屏幕亮度在左键弹出的镜像页底部，做成滑条了)
 
         _menu.Items.Add(MakeItem("设置自选股…", (_, _) =>
@@ -158,6 +180,32 @@ sealed class TrayAppContext : ApplicationContext
         return item;
     }
 
+    void SetWeatherLocation()
+    {
+        var current = string.Join(",", WeatherMonitor.Setting("weather_latitude", "25.0330"),
+            WeatherMonitor.Setting("weather_longitude", "121.5654"),
+            WeatherMonitor.Setting("weather_location", "TAIPEI"));
+        var input = InputDialog.Show("天气位置",
+            "纬度,经度,地点名称（例如 25.0330,121.5654,TAIPEI）", current, current);
+        if (input == null) return;
+        var parts = input.Split(',', 3, StringSplitOptions.TrimEntries);
+        if (parts.Length != 3
+            || !double.TryParse(parts[0], System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var lat)
+            || !double.TryParse(parts[1], System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var lon)
+            || lat is < -90 or > 90 || lon is < -180 or > 180 || parts[2].Length == 0)
+        {
+            MessageBox.Show("请输入有效的纬度、经度和地点名称。", "天气位置",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        Settings.Set("weather_latitude", lat.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Settings.Set("weather_longitude", lon.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Settings.Set("weather_location", parts[2]);
+        _ = _weather.Refresh();
+    }
+
     // MARK: - refresh
 
     void RefreshUsageLines()
@@ -199,6 +247,7 @@ sealed class TrayAppContext : ApplicationContext
         {
             _deviceInfoItem.Text = "设备：未设置地址";
             foreach (var item in _modeItems.Values) item.Checked = false;
+            _mirrorItem.Checked = false;
             return;
         }
         _deviceInfoItem.Text = $"设备：{host}（连接中…）";
@@ -228,6 +277,7 @@ sealed class TrayAppContext : ApplicationContext
         };
         var showing = info.Effective == "pc" ? "PC 监控"
             : info.Effective == "clock" ? "时钟"
+            : info.Effective == "weather" ? "天气"
             : info.Effective == "net" ? "网速"
             : info.Effective == "music" ? "音乐"
             : info.Effective == "stock" ? "股票"
@@ -236,6 +286,7 @@ sealed class TrayAppContext : ApplicationContext
         _deviceInfoItem.Text =
             $"设备：{info.Ip} · 正在显示 {showing} · {string.Join(" ", sprites)}";
         foreach (var (mode, item) in _modeItems) item.Checked = mode == info.Mode;
+        _mirrorItem.Checked = info.HorizontalMirror;
     }
 
     // MARK: - pairing

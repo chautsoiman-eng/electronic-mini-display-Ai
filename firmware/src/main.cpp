@@ -74,7 +74,7 @@ unsigned long lastSwitchMs = 0;
 // Display override, settable from the Mac app via POST /api/display:
 // auto = follow working status, claude/codex = pin that app on screen,
 // net/music = show Mac-side telemetry pages instead of the pet.
-enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_CLOCK, MODE_NET, MODE_MUSIC, MODE_STOCK, MODE_HOLO_AI, MODE_PC };
+enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_CLOCK, MODE_WEATHER, MODE_NET, MODE_MUSIC, MODE_STOCK, MODE_HOLO_AI, MODE_PC };
 DisplayMode displayMode = MODE_AUTO;
 
 DisplayMode effectiveMode();
@@ -102,14 +102,21 @@ int clockLastMinute = -2;
 int clockLastYearDay = -2;
 unsigned long lastClockCheckMs = 0;
 
-// Future weather providers update this struct independently. Until then the
-// renderer displays -- and never substitutes fixture data for live weather.
+// Live weather comes from the Windows bridge. Missing or stale data stays
+// explicit as -- and never substitutes fixture data.
 struct ClockWeather {
   bool temperatureValid = false;
   int temperatureC = 0;
+  int apparentC = 0;
+  int humidityPct = -1;
+  int windKph = -1;
   String condition;
+  String location = "TAIPEI";
 };
 ClockWeather clockWeather;
+bool weatherDirty = true;
+unsigned long lastWeatherPollMs = 0;
+const unsigned long WEATHER_POLL_INTERVAL_MS = 10UL * 60UL * 1000UL;
 
 // ---------- net speed mode state ----------
 // Rendering is decoupled from the network: pollNet() fetches every 2s and
@@ -177,6 +184,7 @@ int musicArtworkRev = -1;
 int musicTextRev = -1;
 bool musicHasArtwork = false;
 bool musicChromeDrawn = false;
+int musicSpectrum[24] = {0};
 unsigned long lastMusicPollMs = 0;
 
 int claudeFrame = 0;
@@ -226,6 +234,7 @@ bool webServerStarted = false; // deferred: port 80 clashes with the portal
 // firmware does the same. 0 = off, 100 = full. Persisted so it survives reboot.
 
 int brightness = BRIGHTNESS_DEFAULT; // 0-100
+bool mirrorHorizontal = false;
 
 void applyBrightness() {
   // analogWriteRange(100) is set in setup(), so the duty value is just the
@@ -246,6 +255,29 @@ void saveBrightness() {
   File f = LittleFS.open(BRIGHTNESS_FILE, "w");
   if (!f) return;
   f.println(brightness);
+  f.close();
+}
+
+// Rotation 0 normally writes only the color-order bit. MX flips the native
+// 240x240 address space horizontally, so every scene and streamed bitmap is
+// mirrored consistently without allocating another frame buffer.
+void applyHorizontalMirror() {
+  tft.writecommand(TFT_MADCTL);
+  tft.writedata((mirrorHorizontal ? TFT_MAD_MX : 0) | TFT_MAD_COLOR_ORDER);
+}
+
+void loadHorizontalMirror() {
+  if (!LittleFS.exists(MIRROR_FILE)) return;
+  File f = LittleFS.open(MIRROR_FILE, "r");
+  if (!f) return;
+  mirrorHorizontal = f.readStringUntil('\n').toInt() == 1;
+  f.close();
+}
+
+void saveHorizontalMirror() {
+  File f = LittleFS.open(MIRROR_FILE, "w");
+  if (!f) return;
+  f.println(mirrorHorizontal ? 1 : 0);
   f.close();
 }
 
@@ -1275,7 +1307,7 @@ void drawMusicTextFallback() {
 }
 
 // Regions repaint independently: cover / text strip only when their rev
-// changes, progress bar + time on every poll (partial fill, no flicker
+// changes, spectrum + progress bar on every poll (partial fill, no flicker
 // elsewhere).
 void drawMusicScreen(bool coverChanged, bool textChanged) {
   if (!musicChromeDrawn) {
@@ -1291,17 +1323,23 @@ void drawMusicScreen(bool coverChanged, bool textChanged) {
     if (!drawMusicTextFromBridge()) drawMusicTextFallback();
   }
 
-  const int bx = 20, by = 204, bw = 200, bh = 8;
-  tft.fillRect(0, by - 2, SCREEN_W, SCREEN_H - by + 2, TFT_BLACK);
+  const int spectrumY = 198;
+  tft.fillRect(0, spectrumY, SCREEN_W, SCREEN_H - spectrumY, TFT_BLACK);
+  const uint16_t spectrumBg = tft.color565(22, 54, 62);
+  for (int i = 0; i < 24; i++) {
+    int level = constrain(musicSpectrum[i], 0, 100);
+    int h = level * 28 / 100;
+    int x = 8 + i * 9;
+    tft.fillRect(x, 201, 6, 28, spectrumBg);
+    if (h > 0) tft.fillRect(x, 229 - h, 6, h, TFT_GREEN);
+  }
+  const int bx = 8, by = 233, bw = 224, bh = 3;
   tft.fillRect(bx, by, bw, bh, TFT_DARKGREY);
   float progress = musicDuration > 0 ? (float)musicElapsed / (float)musicDuration : 0;
   if (progress < 0) progress = 0;
   if (progress > 1) progress = 1;
   uint16_t color = musicPlaying ? TFT_GREEN : TFT_LIGHTGREY;
   tft.fillRect(bx, by, (int)(bw * progress), bh, color);
-  tft.setTextDatum(TC_DATUM);
-  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  tft.drawString(timeText(musicElapsed) + " / " + timeText(musicDuration), SCREEN_CX, 220, 1);
 }
 
 void pollMusic() {
@@ -1329,6 +1367,9 @@ void pollMusic() {
       int tRev = doc["text_rev"] | -1;
       bool textChanged = tRev != musicTextRev;
       musicTextRev = tRev;
+      JsonArray spectrum = doc["spectrum"];
+      for (int i = 0; i < 24; i++)
+        musicSpectrum[i] = i < (int)spectrum.size() ? constrain(spectrum[i].as<int>(), 0, 100) : 0;
       drawMusicScreen(coverChanged, textChanged);
     }
   }
@@ -1689,6 +1730,83 @@ void drawClockDynamic(bool force = false) {
   tft.drawString(weekdays[local.tm_wday], 120, 153, 2);
 }
 
+// ---------- Weather ----------
+bool handleWeatherPayload(const String &payload) {
+  JsonDocument doc;
+  if (deserializeJson(doc, payload)) return false;
+  bool valid = doc["valid"] | false;
+  clockWeather.temperatureValid = valid && doc["temperature_c"].is<float>();
+  if (clockWeather.temperatureValid)
+    clockWeather.temperatureC = (int)round(doc["temperature_c"].as<float>());
+  clockWeather.apparentC = doc["apparent_c"].is<float>()
+      ? (int)round(doc["apparent_c"].as<float>()) : 0;
+  clockWeather.humidityPct = doc["humidity_pct"].is<int>() ? doc["humidity_pct"].as<int>() : -1;
+  clockWeather.windKph = doc["wind_kph"].is<float>()
+      ? (int)round(doc["wind_kph"].as<float>()) : -1;
+  clockWeather.condition = valid ? String((const char *)(doc["condition"] | "")) : "";
+  clockWeather.location = String((const char *)(doc["location"] | "TAIPEI"));
+  weatherDirty = true;
+  // Clock chrome owns the weather footer; rebuild it after fresh data.
+  clockChromeDrawn = false;
+  return true;
+}
+
+void pollWeather() {
+  if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return;
+  WiFiClient client;
+  HTTPClient http;
+  String url = "http://" + bridgeHost + "/weather";
+  http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
+  if (!http.begin(client, url)) return;
+  int code = http.GET();
+  if (code == HTTP_CODE_OK) handleWeatherPayload(http.getString());
+  http.end();
+}
+
+String weatherValue(bool valid, int value, const String &suffix) {
+  return valid ? String(value) + suffix : "--";
+}
+
+void drawWeatherScreen() {
+  const uint16_t cyan = tft.color565(88, 220, 222);
+  const uint16_t muted = tft.color565(113, 151, 164);
+  const uint16_t grid = tft.color565(24, 71, 82);
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(cyan, TFT_BLACK);
+  tft.drawString("WEATHER", 14, 8, 2);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(muted, TFT_BLACK);
+  String place = clockWeather.location.length() ? clockWeather.location : "TAIPEI";
+  if (place.length() > 14) place = place.substring(0, 14);
+  tft.drawString(place, 226, 9, 1);
+  tft.drawFastHLine(14, 29, 212, grid);
+
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(weatherValue(clockWeather.temperatureValid, clockWeather.temperatureC, "C"), 120, 78, 6);
+  tft.setTextColor(clockWeather.temperatureValid ? cyan : TFT_ORANGE, TFT_BLACK);
+  String condition = clockWeather.temperatureValid ? clockWeather.condition : "WAITING FOR DATA";
+  condition.toUpperCase();
+  if (condition.length() > 20) condition = condition.substring(0, 20);
+  tft.drawString(condition, 120, 130, 2);
+  tft.drawFastHLine(14, 155, 212, grid);
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(muted, TFT_BLACK);
+  tft.drawString("FEELS LIKE", 14, 169, 2);
+  tft.drawString("HUMIDITY", 14, 194, 2);
+  tft.drawString("WIND", 14, 219, 2);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(weatherValue(clockWeather.temperatureValid, clockWeather.apparentC, "C"), 226, 169, 2);
+  tft.drawString(weatherValue(clockWeather.temperatureValid && clockWeather.humidityPct >= 0,
+                              clockWeather.humidityPct, "%"), 226, 194, 2);
+  tft.drawString(weatherValue(clockWeather.temperatureValid && clockWeather.windKph >= 0,
+                              clockWeather.windKph, " KM/H"), 226, 219, 2);
+  weatherDirty = false;
+}
+
 // ---------- PC monitor ----------
 const unsigned long PC_POLL_MS = 1000;
 const unsigned long PC_STALE_MS = 5000;
@@ -1956,12 +2074,19 @@ void handleSerialFrame(char *line) {
       else if (m == "claude") displayMode = MODE_CLAUDE;
       else if (m == "codex") displayMode = MODE_CODEX;
       else if (m == "clock") displayMode = MODE_CLOCK;
+      else if (m == "weather") displayMode = MODE_WEATHER;
       else if (m == "net") displayMode = MODE_NET;
       else if (m == "music") displayMode = MODE_MUSIC;
       else if (m == "stock") displayMode = MODE_STOCK;
       else if (m == "holo_ai") displayMode = MODE_HOLO_AI;
       else if (m == "pc") displayMode = MODE_PC;
       // the effectiveMode transition handler in loop() repaints the chrome
+    }
+    if (doc["mirror"].is<bool>()) {
+      mirrorHorizontal = doc["mirror"].as<bool>();
+      applyHorizontalMirror();
+      saveHorizontalMirror();
+      lastEffectiveMode = (DisplayMode)-1;
     }
     return;
   }
@@ -2082,6 +2207,7 @@ const char *displayModeName(DisplayMode m) {
   if (m == MODE_CLAUDE) return "claude";
   if (m == MODE_CODEX) return "codex";
   if (m == MODE_CLOCK) return "clock";
+  if (m == MODE_WEATHER) return "weather";
   if (m == MODE_NET) return "net";
   if (m == MODE_MUSIC) return "music";
   if (m == MODE_STOCK) return "stock";
@@ -2102,6 +2228,7 @@ void handleApiInfo() {
   doc["last_update_s"] = everPolled ? (long)((millis() - lastSuccessMs) / 1000) : -1;
   doc["sprite_rev"] = spriteRev;
   doc["brightness"] = brightness;
+  doc["mirror_horizontal"] = mirrorHorizontal;
   doc["wired"] = wiredActive(); // true = data currently arrives over USB serial
   doc["fw"] = FW_VERSION;
   doc["clock_synced"] = time(nullptr) >= 1609459200;
@@ -2127,13 +2254,14 @@ void handleApiDisplay() {
   else if (mode == "claude") displayMode = MODE_CLAUDE;
   else if (mode == "codex") displayMode = MODE_CODEX;
   else if (mode == "clock") displayMode = MODE_CLOCK;
+  else if (mode == "weather") displayMode = MODE_WEATHER;
   else if (mode == "net") displayMode = MODE_NET;
   else if (mode == "music") displayMode = MODE_MUSIC;
   else if (mode == "stock") displayMode = MODE_STOCK;
   else if (mode == "holo_ai") displayMode = MODE_HOLO_AI;
   else if (mode == "pc") displayMode = MODE_PC;
   else {
-    webServer.send(400, "text/plain", "mode must be auto|claude|codex|clock|net|music|stock|holo_ai|pc");
+    webServer.send(400, "text/plain", "mode must be auto|claude|codex|clock|weather|net|music|stock|holo_ai|pc");
     return;
   }
   Serial.printf("[api] display mode = %s\n", mode.c_str());
@@ -2154,6 +2282,18 @@ void handleApiBrightness() {
   applyBrightness();
   saveBrightness();
   Serial.printf("[api] brightness = %d\n", brightness);
+  webServer.send(200, "text/plain", "ok");
+}
+
+void handleApiMirror() {
+  if (!webServer.hasArg("enabled")) {
+    webServer.send(400, "text/plain", "missing enabled (0|1)");
+    return;
+  }
+  mirrorHorizontal = webServer.arg("enabled") == "1" || webServer.arg("enabled") == "true";
+  applyHorizontalMirror();
+  saveHorizontalMirror();
+  lastEffectiveMode = (DisplayMode)-1; // force a clean repaint in the new address direction
   webServer.send(200, "text/plain", "ok");
 }
 
@@ -2454,6 +2594,7 @@ void setupWebServer() {
   webServer.on("/api/display", HTTP_POST, handleApiDisplay);
   webServer.on("/api/bridge", HTTP_POST, handleApiBridge);
   webServer.on("/api/brightness", HTTP_POST, handleApiBrightness);
+  webServer.on("/api/mirror", HTTP_POST, handleApiMirror);
   webServer.on("/sprite/claude/reset", HTTP_POST, []() { handleSpriteReset(APP_CLAUDE); });
   webServer.on("/sprite/codex/reset", HTTP_POST, []() { handleSpriteReset(APP_CODEX); });
   webServer.on("/sprite/claude/raw", HTTP_GET, []() { handleSpriteRaw(APP_CLAUDE); });
@@ -2476,10 +2617,12 @@ void setup() {
   LittleFS.begin();
   loadBridgeHost();
   loadBrightness();
+  loadHorizontalMirror();
   loadCustomSpriteState();
 
   tft.init();
   tft.setRotation(0);
+  applyHorizontalMirror();
   tft.fillScreen(TFT_BLACK);
   analogWriteFreq(BRIGHTNESS_PWM_FREQ);
   analogWriteRange(100); // duty maps 1:1 to a 0-100 percentage
@@ -2537,6 +2680,10 @@ void loop() {
       clockLastMinute = -2;
       clockLastYearDay = -2;
       drawClockDynamic(true);
+      lastWeatherPollMs = 0;
+    } else if (eff == MODE_WEATHER) {
+      weatherDirty = true;
+      lastWeatherPollMs = 0;
     } else if (eff == MODE_PC) {
       pcDirty = true;
       lastPcPollMs = nowMs - PC_POLL_MS;
@@ -2558,10 +2705,20 @@ void loop() {
   }
 
   if (eff == MODE_CLOCK) {
+    if (nowMs - lastWeatherPollMs >= WEATHER_POLL_INTERVAL_MS || lastWeatherPollMs == 0) {
+      lastWeatherPollMs = nowMs;
+      pollWeather();
+    }
     if (nowMs - lastClockCheckMs >= 1000UL) {
       lastClockCheckMs = nowMs;
       drawClockDynamic();
     }
+  } else if (eff == MODE_WEATHER) {
+    if (nowMs - lastWeatherPollMs >= WEATHER_POLL_INTERVAL_MS || lastWeatherPollMs == 0) {
+      lastWeatherPollMs = nowMs;
+      pollWeather();
+    }
+    if (weatherDirty) drawWeatherScreen();
   } else if (eff == MODE_PC) {
     if (nowMs - lastPcPollMs >= PC_POLL_MS) {
       lastPcPollMs = nowMs;

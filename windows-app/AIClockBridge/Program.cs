@@ -22,9 +22,16 @@ static class Program
         }
 
         ApplicationConfiguration.Initialize();
+        using var weather = new WeatherMonitor();
+        weather.Start();
         if (args.Contains("--clock-preview"))
         {
-            Application.Run(new ClockPreviewForm());
+            Application.Run(new ClockPreviewForm(weather));
+            return;
+        }
+        if (args.Contains("--weather-preview"))
+        {
+            Application.Run(new WeatherPreviewForm(weather));
             return;
         }
         using var pcMonitor = new PcMonitor();
@@ -42,6 +49,8 @@ static class Program
         netMonitor.Start();
         var nowPlaying = new NowPlayingMonitor();
         nowPlaying.Start();
+        using var spectrum = new AudioSpectrumMonitor();
+        spectrum.Start();
         service.MusicPlayingProvider = () => nowPlaying.Snapshot.Playing;
         var stockMonitor = new StockMonitor();
         stockMonitor.Start();
@@ -52,7 +61,8 @@ static class Program
                 ["/"] = () => service.Snapshot().ToJson(),
                 ["/status"] = () => service.Snapshot().ToJson(),
                 ["/net"] = () => netMonitor.ToJson(SystemStatsMonitor.Snapshot()),
-                ["/music"] = () => nowPlaying.ToJson(),
+                ["/music"] = () => nowPlaying.ToJson(spectrum.Levels),
+                ["/weather"] = () => weather.ToJson(),
                 ["/stock"] = () => stockMonitor.ToJson(),
                 ["/pc"] = () => pcMonitor.Snapshot().ToJson(),
             },
@@ -97,7 +107,8 @@ static class Program
         // outright when no device is configured yet.
         server.OnRequest = (path, ip) =>
         {
-            if (path != "/status" && path != "/net" && path != "/music" && path != "/pc") return;
+            if (path != "/status" && path != "/net" && path != "/music"
+                && path != "/weather" && path != "/pc") return;
             if (ip == "127.0.0.1" || ip == "::1" || ip.Length == 0) return;
             DeviceClient.DevicePollAt = DateTime.UtcNow;
             DeviceClient.LastSeenIp = ip;
@@ -120,7 +131,8 @@ static class Program
             Console.Error.WriteLine($"[bridge] failed to bind port {Port}: {e.Message}");
         }
 
-        var context = new TrayAppContext(service, usage, netMonitor, nowPlaying, stockMonitor, pcMonitor, Port);
+        var context = new TrayAppContext(service, usage, netMonitor, nowPlaying, spectrum,
+            stockMonitor, pcMonitor, weather, Port);
         usage.StartAutoRefresh();
         Application.Run(context);
     }

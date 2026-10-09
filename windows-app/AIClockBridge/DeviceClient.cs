@@ -21,6 +21,7 @@ class DeviceInfo
     public int LastUpdateS = -1;       // seconds since the device last got /status data, -1 = never
     public int SpriteRev;              // bumped by the device on animation change
     public int Brightness = 100;       // backlight 0-100 (0 = off)
+    public bool HorizontalMirror;
     public bool ClaudeCustomSprite;
     public bool CodexCustomSprite;
     public int ClaudeW = 111, ClaudeH = 120;
@@ -99,6 +100,7 @@ static class DeviceClient
                 LastUpdateS = Int(root, "last_update_s", -1),
                 SpriteRev = Int(root, "sprite_rev"),
                 Brightness = Int(root, "brightness", 100),
+                HorizontalMirror = Bool(root, "mirror_horizontal"),
                 Showing = Str(root, "showing"),
             };
             info.Effective = Str(root, "effective", info.Mode);
@@ -122,7 +124,7 @@ static class DeviceClient
         }
     }
 
-    /// POST /api/display  mode=auto|claude|codex|clock|net|music|stock|holo_ai|pc
+    /// POST /api/display  mode=auto|claude|codex|clock|weather|net|music|stock|holo_ai|pc
     public static Task SetDisplayMode(string mode) =>
         PostForm("api/display", new() { ["mode"] = mode });
 
@@ -133,6 +135,10 @@ static class DeviceClient
     /// POST /api/brightness  level=0-100 (0 = backlight off); device persists it
     public static Task SetBrightness(int level) =>
         PostForm("api/brightness", new() { ["level"] = level.ToString() });
+
+    /// POST /api/mirror enabled=0|1; device persists it.
+    public static Task SetHorizontalMirror(bool enabled) =>
+        PostForm("api/mirror", new() { ["enabled"] = enabled ? "1" : "0" });
 
     /// POST /sprite/{claude|codex}  multipart GIF upload — the device decodes
     /// and rescales the GIF on-board, then swaps the animation immediately.

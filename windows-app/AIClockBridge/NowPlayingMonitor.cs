@@ -76,7 +76,7 @@ sealed class NowPlayingMonitor
             TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2));
     }
 
-    public byte[] ToJson()
+    public byte[] ToJson(int[] spectrum = null)
     {
         RenderTextIfNeeded();
         var s = Snapshot;
@@ -99,6 +99,7 @@ sealed class NowPlayingMonitor
             ["artwork_rev"] = s.ArtworkRev,
             ["has_artwork"] = hasArtwork,
             ["text_rev"] = tRev,
+            ["spectrum"] = spectrum ?? new int[SpectrumAnalyzer.BarCount],
         });
     }
 

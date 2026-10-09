@@ -21,10 +21,10 @@ ESP8266 系統時鐘仍會繼續走時。動態區域每秒檢查，但只在分
 
 ## 天氣介面
 
-專案目前沒有可重用的真實天氣 API。Windows 使用 `IClockWeatherSource` /
-`WeatherSnapshot`，韌體使用獨立的 `ClockWeather` 狀態。未接入來源時溫度及狀態顯示
-`--`／`WEATHER --`；時鐘不依賴天氣成功才能運作。這個介面供後續 Weather 頁或 API
-接入，現階段沒有假裝即時的 fixture 資料。
+Windows 橋接使用免金鑰的 Open-Meteo current weather API，每 10 分鐘更新並透過
+`GET /weather` 提供裝置。資料超過 30 分鐘或 API 失敗時顯示 `--`／`WEATHER --`；
+時鐘不依賴天氣成功才能運作，也不會用測試資料冒充即時天氣。預設位置是台北，
+可從 Windows 托盤的「设置天气位置…」修改緯度、經度與顯示名稱。
 
 ## 版面與驗證
 

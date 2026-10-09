@@ -17,7 +17,7 @@
   `%USERPROFILE%\.claude\.credentials.json` 和 `%USERPROFILE%\.codex\auth.json`，
   token 只发给各自官方 API）
 - 音乐页读系统级 Now Playing（WinRT `GlobalSystemMediaTransportControlsSessionManager`，
-  Spotify / 浏览器 / 本地播放器都能识别）；网速取物理网卡（以太网/WiFi）字节计数，
+  Spotify / 浏览器 / 本地播放器都能识别），NAudio WASAPI loopback 產生 24 條 FFT 頻譜；网速取物理网卡（以太网/WiFi）字节计数，
   4Hz 采样，排除 VPN/虚拟网卡
 
 与 Mac 版的差异：
@@ -40,8 +40,14 @@ GPU 使用 Windows GPU Engine 計數器，NVIDIA 工具為 fallback；CPU 溫度
 
 啟動 `AIClockBridge.exe --clock-preview` 可查看使用 `Asia/Taipei` 的 240×240
 即時 Clock renderer；一般托盤模式亦有「时钟（本机预览，无需设备）」。連接電子鐘後，
-可在「屏幕显示 → 时钟」切換裝置頁面。天氣來源尚未接入，正確顯示 `--`。
+可在「屏幕显示 → 时钟」切換裝置頁面。天氣由 Open-Meteo 提供，無資料時正確顯示 `--`。
 詳見 [Clock 設計與驗證](../docs/CLOCK.md)。
+
+### Weather 與水平鏡像
+
+啟動 `AIClockBridge.exe --weather-preview` 或從托盤開啟 Weather 本機預覽。Weather 頁與
+Clock 底部共用真實資料；預設台北，可用「设置天气位置…」修改。托盤的「45° 全息水平镜像」
+會寫入裝置並永久保存，Windows 即時鏡像也跟隨同一設定。
 
 需要 [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)（Windows 10
 19041+ / Windows 11）：
@@ -102,6 +108,8 @@ Claude 111×120 / Codex 120×120 黑底 GIF、最多八幀及無限循環。
     dotnet run --project windows-app/Petdex.Tests -c Release
     dotnet run --project windows-app/HoloAi.Tests -c Release -- previews
     dotnet run --project windows-app/PcMonitor.Tests -c Release -- previews
+    dotnet run --project windows-app/Clock.Tests -c Release -- previews
+    dotnet run --project windows-app/Dashboard.Tests -c Release -- previews
     dotnet list windows-app/AIClockBridge package --vulnerable --include-transitive
 
 Petdex.Tests 使用可重現的透明 WebP 圖集與 Windows GDI+ 獨立 GIF 解碼，

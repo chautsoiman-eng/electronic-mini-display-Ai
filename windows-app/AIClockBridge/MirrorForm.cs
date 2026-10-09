@@ -47,7 +47,10 @@ sealed class MirrorControl : Control
     public bool HoloMode;
     public bool PcMode;
     public bool ClockMode;
+    public bool WeatherMode;
+    public bool HorizontalMirror;
     public long ClockMinute = long.MinValue;
+    public WeatherSnapshot WeatherData = new();
     public PcTelemetry PcData = new();
     public HoloProvider HoloClaude, HoloCodex;
     public string MusicTitle = "";
@@ -56,6 +59,7 @@ sealed class MirrorControl : Control
     public double MusicDuration;
     public bool MusicPlaying;
     public Bitmap MusicCover;
+    public int[] MusicSpectrum = new int[SpectrumAnalyzer.BarCount];
 
     static readonly Image ClaudeLogo = LoadAsset("claude-logo.png");
     static readonly Image CodexLogo = LoadAsset("codex-logo.png");
@@ -112,6 +116,11 @@ sealed class MirrorControl : Control
             g.FillPath(Brushes.Black, panel);
             g.SetClip(panel);
         }
+        if (HorizontalMirror)
+        {
+            g.TranslateTransform(240, 0);
+            g.ScaleTransform(-1, 1);
+        }
 
         if (PcMode)
         {
@@ -120,7 +129,12 @@ sealed class MirrorControl : Control
         }
         if (ClockMode)
         {
-            ClockScene.Draw(g, ClockScene.FromUtc(DateTimeOffset.UtcNow));
+            ClockScene.Draw(g, ClockScene.FromUtc(DateTimeOffset.UtcNow, WeatherData));
+            return;
+        }
+        if (WeatherMode)
+        {
+            WeatherScene.Draw(g, WeatherData);
             return;
         }
         if (HoloMode)
@@ -207,47 +221,8 @@ sealed class MirrorControl : Control
 
     void DrawMusicScene(Graphics g)
     {
-        var coverRect = new Rectangle(56, 16, 128, 128);
-        if (MusicCover != null)
-        {
-            var state = g.Save();
-            g.InterpolationMode = InterpolationMode.NearestNeighbor;
-            g.PixelOffsetMode = PixelOffsetMode.Half;
-            g.DrawImage(MusicCover, coverRect);
-            g.Restore(state);
-        }
-        else
-        {
-            using var dark = new SolidBrush(Color.FromArgb(64, 64, 64));
-            g.FillRectangle(dark, coverRect);
-            using var font = new Font("Consolas", 13, FontStyle.Bold, GraphicsUnit.Pixel);
-            using var fmt = new StringFormat { Alignment = StringAlignment.Center };
-            g.DrawString("No Art", font, Brushes.LightGray, new RectangleF(56, 72, 128, 20), fmt);
-        }
-
-        using var titleFmt = new StringFormat
-        {
-            Alignment = StringAlignment.Center,
-            Trimming = StringTrimming.EllipsisCharacter,
-            FormatFlags = StringFormatFlags.NoWrap,
-        };
-        var title = MusicTitle.Length == 0 ? "No Music" : MusicTitle;
-        using (var font = new Font("Microsoft YaHei UI", 15, FontStyle.Bold, GraphicsUnit.Pixel))
-        {
-            g.DrawString(title, font, Brushes.White, new RectangleF(12, 154, 216, 24), titleFmt);
-        }
-        using (var font = new Font("Microsoft YaHei UI", 12, FontStyle.Regular, GraphicsUnit.Pixel))
-        {
-            g.DrawString(MusicArtist, font, Brushes.LightGray,
-                         new RectangleF(12, 178, 216, 20), titleFmt);
-        }
-
-        var bar = new RectangleF(20, 210, 200, 8);
-        using var barBg = new SolidBrush(Color.FromArgb(64, 64, 64));
-        g.FillRectangle(barBg, bar);
-        var frac = MusicDuration > 0 ? (float)Math.Clamp(MusicElapsed / MusicDuration, 0, 1) : 0;
-        using var barFill = new SolidBrush(MusicPlaying ? Green : Color.Gray);
-        g.FillRectangle(barFill, bar.X, bar.Y, bar.Width * frac, bar.Height);
+        MusicScene.Draw(g, MusicTitle, MusicArtist, MusicElapsed, MusicDuration,
+                        MusicPlaying, MusicCover, MusicSpectrum);
     }
 
     /// Replica of the firmware's net-speed screen v2: header readouts, then
@@ -406,12 +381,14 @@ sealed class MirrorForm : Form
     readonly StatusService _service;
     readonly NetSpeedMonitor _netMonitor;
     readonly NowPlayingMonitor _nowPlaying;
+    readonly AudioSpectrumMonitor _spectrum;
     readonly StockMonitor _stockMonitor;
     readonly PcMonitor _pcMonitor;
+    readonly WeatherMonitor _weather;
     readonly MirrorControl _mirror = new();
     readonly RadioButton[] _modeButtons;
-    static readonly string[] Modes = { "auto", "claude", "codex", "clock", "net", "music", "stock", "holo_ai", "pc" };
-    static readonly string[] ModeLabels = { "自动", "Claude", "Codex", "时钟", "网速", "音乐", "股票", "Holo AI", "PC" };
+    static readonly string[] Modes = { "auto", "claude", "codex", "clock", "weather", "net", "music", "stock", "holo_ai", "pc" };
+    static readonly string[] ModeLabels = { "自动", "Claude", "Codex", "时钟", "天气", "网速", "音乐", "股票", "Holo AI", "PC" };
     readonly Label _statusLabel = new();
     readonly TrackBar _brightness = new() { Minimum = 0, Maximum = 100, TickStyle = TickStyle.None };
     readonly Label _brightnessValue = new();
@@ -433,13 +410,16 @@ sealed class MirrorForm : Form
     bool _applyingMode; // suppress CheckedChanged while reflecting device state
 
     public MirrorForm(StatusService service, NetSpeedMonitor netMonitor, NowPlayingMonitor nowPlaying,
-                      StockMonitor stockMonitor, PcMonitor pcMonitor)
+                      AudioSpectrumMonitor spectrum, StockMonitor stockMonitor, PcMonitor pcMonitor,
+                      WeatherMonitor weather)
     {
         _service = service;
         _netMonitor = netMonitor;
         _nowPlaying = nowPlaying;
+        _spectrum = spectrum;
         _stockMonitor = stockMonitor;
         _pcMonitor = pcMonitor;
+        _weather = weather;
 
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
@@ -616,6 +596,7 @@ sealed class MirrorForm : Form
         if (!Visible) return;
         _lastInfo = info;
         _mirror.DeviceOK = true;
+        _mirror.HorizontalMirror = info.HorizontalMirror;
         ApplyScene(info);
         EnsureSprite(info);
         SyncBrightness(info);
@@ -628,6 +609,7 @@ sealed class MirrorForm : Form
             : info.Mode == "holo_ai" ? "Holo AI 监控"
             : info.Mode == "pc" ? "PC 监控"
             : info.Mode == "clock" ? "时钟"
+            : info.Mode == "weather" ? "天气"
             : info.Mode == "stock" ? "股票行情"
             : info.Mode == "music" ? "音乐播放" : "固定显示";
         _statusLabel.Text = $"{info.Ip} · {modeText} · 数据 {info.Bridge}";
@@ -645,6 +627,8 @@ sealed class MirrorForm : Form
         _mirror.HoloMode = info.Effective == "holo_ai";
         _mirror.PcMode = info.Effective == "pc";
         _mirror.ClockMode = info.Effective == "clock";
+        _mirror.WeatherMode = info.Effective == "weather";
+        _mirror.WeatherData = _weather.Snapshot;
         if (_mirror.ClockMode)
         {
             var minute = ClockScene.FromUtc(DateTimeOffset.UtcNow).MinuteKey;
@@ -653,6 +637,11 @@ sealed class MirrorForm : Form
                 _mirror.ClockMinute = minute;
                 _mirror.Invalidate();
             }
+            return;
+        }
+        if (_mirror.WeatherMode)
+        {
+            _mirror.Invalidate();
             return;
         }
         if (_mirror.PcMode)
@@ -693,6 +682,7 @@ sealed class MirrorForm : Form
             _mirror.MusicElapsed = s.Elapsed;
             _mirror.MusicDuration = s.Duration;
             _mirror.MusicPlaying = s.Playing;
+            _mirror.MusicSpectrum = _spectrum.Levels;
             _mirror.MusicCover?.Dispose();
             var cover = _nowPlaying.CoverRgb565;
             _mirror.MusicCover = cover.Length > 0 ? Rgb565.Decode(cover, 0, 128, 128) : null;
@@ -784,7 +774,7 @@ sealed class MirrorForm : Form
 
     void AnimTick()
     {
-        if (_lastInfo == null || _mirror.ClockMode || _mirror.PcMode || _mirror.NetMode || _mirror.HoloMode || _mirror.MusicMode || _mirror.StockMode) return;
+        if (_lastInfo == null || _mirror.ClockMode || _mirror.WeatherMode || _mirror.PcMode || _mirror.NetMode || _mirror.HoloMode || _mirror.MusicMode || _mirror.StockMode) return;
 
         // ~400ms red-border flash while an approval is pending (device cadence)
         if (_mirror.NeedsInput)

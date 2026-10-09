@@ -6,7 +6,16 @@ using System.Globalization;
 namespace AIClockBridge;
 
 // 天氣先保留明確介面；沒有真實來源時維持 null，畫面顯示 --。
-record WeatherSnapshot(double? TemperatureC = null, string Condition = null);
+record WeatherSnapshot(double? TemperatureC = null, string Condition = null)
+{
+    public double? ApparentC { get; init; }
+    public int? HumidityPct { get; init; }
+    public double? WindKph { get; init; }
+    public int? WeatherCode { get; init; }
+    public string Location { get; init; } = "TAIPEI";
+    public DateTimeOffset? UpdatedAt { get; init; }
+    public bool IsLive { get; init; }
+}
 
 interface IClockWeatherSource
 {
