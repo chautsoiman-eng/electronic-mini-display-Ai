@@ -18,6 +18,14 @@ Check(weather.Condition == "PARTLY CLOUDY", "WMO condition mapped");
 Check(weather.Location == "TAIPEI", "location normalized");
 Check(WeatherMonitor.Condition(95) == "THUNDERSTORM", "thunderstorm mapping");
 Check(WeatherMonitor.Condition(999) == "UNKNOWN", "unknown WMO code");
+Check(WeatherScene.IconForCode(0) == WeatherIconKind.Clear, "clear icon mapping");
+Check(WeatherScene.IconForCode(2) == WeatherIconKind.PartlyCloudy, "partly cloudy icon mapping");
+Check(WeatherScene.IconForCode(48) == WeatherIconKind.Fog, "fog icon mapping");
+Check(WeatherScene.IconForCode(63) == WeatherIconKind.Rain, "rain icon mapping");
+Check(WeatherScene.IconForCode(82) == WeatherIconKind.Showers, "showers icon mapping");
+Check(WeatherScene.IconForCode(75) == WeatherIconKind.Snow, "snow icon mapping");
+Check(WeatherScene.IconForCode(95) == WeatherIconKind.Thunderstorm, "thunderstorm icon mapping");
+Check(WeatherScene.IconForCode(null) == WeatherIconKind.None, "missing code has no fake icon");
 
 var silence = SpectrumAnalyzer.Analyze(new float[SpectrumAnalyzer.FftSize], 48000);
 Check(silence.Length == 24 && silence.All(x => x == 0), "silence produces 24 zero bars");

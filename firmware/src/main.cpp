@@ -110,6 +110,7 @@ struct ClockWeather {
   int apparentC = 0;
   int humidityPct = -1;
   int windKph = -1;
+  int weatherCode = -1;
   String condition;
   String location = "TAIPEI";
 };
@@ -1743,6 +1744,7 @@ bool handleWeatherPayload(const String &payload) {
   clockWeather.humidityPct = doc["humidity_pct"].is<int>() ? doc["humidity_pct"].as<int>() : -1;
   clockWeather.windKph = doc["wind_kph"].is<float>()
       ? (int)round(doc["wind_kph"].as<float>()) : -1;
+  clockWeather.weatherCode = doc["weather_code"].is<int>() ? doc["weather_code"].as<int>() : -1;
   clockWeather.condition = valid ? String((const char *)(doc["condition"] | "")) : "";
   clockWeather.location = String((const char *)(doc["location"] | "TAIPEI"));
   weatherDirty = true;
@@ -1767,6 +1769,56 @@ String weatherValue(bool valid, int value, const String &suffix) {
   return valid ? String(value) + suffix : "--";
 }
 
+void drawWeatherSun(int x, int y, int r) {
+  uint16_t yellow = tft.color565(255, 204, 0);
+  tft.fillCircle(x, y, r, yellow);
+  for (int i = 0; i < 8; i++) {
+    float a = i * PI / 4.0f;
+    tft.drawLine(x + cos(a) * (r + 4), y + sin(a) * (r + 4),
+                 x + cos(a) * (r + 10), y + sin(a) * (r + 10), yellow);
+  }
+}
+
+void drawWeatherCloud(int x, int y) {
+  uint16_t cloud = tft.color565(192, 220, 226);
+  tft.fillCircle(x - 9, y + 2, 12, cloud);
+  tft.fillCircle(x + 7, y - 6, 15, cloud);
+  tft.fillCircle(x + 22, y + 3, 10, cloud);
+  tft.fillRect(x - 20, y + 2, 52, 15, cloud);
+}
+
+void drawWeatherIcon(int code, int x, int y) {
+  const uint16_t cyan = tft.color565(88, 220, 222);
+  const uint16_t yellow = tft.color565(255, 204, 0);
+  if (code == 0) {
+    drawWeatherSun(x, y, 12);
+  } else if (code == 1 || code == 2) {
+    drawWeatherSun(x - 10, y - 10, 9);
+    drawWeatherCloud(x + 1, y + 5);
+  } else if (code == 3) {
+    drawWeatherCloud(x, y);
+  } else if (code == 45 || code == 48) {
+    for (int i = -1; i <= 1; i++) tft.drawFastHLine(x - 25, y + i * 10, 50, cyan);
+  } else {
+    drawWeatherCloud(x, y - 8);
+    bool rain = (code >= 51 && code <= 67) || (code >= 80 && code <= 82);
+    bool snow = (code >= 71 && code <= 77) || code == 85 || code == 86;
+    bool thunder = code == 95 || code == 96 || code == 99;
+    if (rain) {
+      for (int i = -1; i <= 1; i++) tft.drawLine(x + i * 15, y + 16, x + i * 15 - 5, y + 27, cyan);
+    } else if (snow) {
+      for (int i = -1; i <= 1; i++) {
+        tft.drawFastHLine(x + i * 15 - 4, y + 22, 9, TFT_WHITE);
+        tft.drawFastVLine(x + i * 15, y + 18, 9, TFT_WHITE);
+      }
+    } else if (thunder) {
+      tft.drawLine(x + 2, y + 12, x - 5, y + 25, yellow);
+      tft.drawLine(x - 5, y + 25, x + 3, y + 25, yellow);
+      tft.drawLine(x + 3, y + 25, x - 3, y + 36, yellow);
+    }
+  }
+}
+
 void drawWeatherScreen() {
   const uint16_t cyan = tft.color565(88, 220, 222);
   const uint16_t muted = tft.color565(113, 151, 164);
@@ -1782,9 +1834,11 @@ void drawWeatherScreen() {
   tft.drawString(place, 226, 9, 1);
   tft.drawFastHLine(14, 29, 212, grid);
 
+  if (clockWeather.temperatureValid) drawWeatherIcon(clockWeather.weatherCode, 58, 78);
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(weatherValue(clockWeather.temperatureValid, clockWeather.temperatureC, "C"), 120, 78, 6);
+  tft.drawString(weatherValue(clockWeather.temperatureValid, clockWeather.temperatureC, "C"),
+                 clockWeather.temperatureValid ? 160 : 120, 78, 6);
   tft.setTextColor(clockWeather.temperatureValid ? cyan : TFT_ORANGE, TFT_BLACK);
   String condition = clockWeather.temperatureValid ? clockWeather.condition : "WAITING FOR DATA";
   condition.toUpperCase();
