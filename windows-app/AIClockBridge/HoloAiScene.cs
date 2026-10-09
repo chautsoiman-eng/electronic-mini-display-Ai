@@ -21,7 +21,20 @@ static class HoloAiScene
         : minutes >= 1440 ? $"{minutes / 1440}d {minutes % 1440 / 60}h"
         : minutes >= 60 ? $"{minutes / 60}h {minutes % 60}m" : $"{minutes}m";
 
-    public static void Draw(Graphics g, HoloProvider claude, HoloProvider codex, bool connected)
+    // Same layout constants as firmware drawHoloAi().
+    internal const int PetBox = 60, PetX = 14, ClaudePetY = 40, CodexPetY = 146;
+    internal const int BarX = 84, BarW = 142;
+
+    /// Half-size pet rectangle for a w x h sprite, centred in its 60x60 box
+    /// (firmware drawHoloPet samples every second row/column).
+    internal static Rectangle PetRect(int boxY, int w, int h)
+    {
+        int dw = (w + 1) / 2, dh = (h + 1) / 2;
+        return new Rectangle(PetX + (PetBox - dw) / 2, boxY + (PetBox - dh) / 2, dw, dh);
+    }
+
+    public static void Draw(Graphics g, HoloProvider claude, HoloProvider codex, bool connected,
+                            Bitmap claudePet = null, Bitmap codexPet = null)
     {
         using var font = new Font("Consolas", 13, FontStyle.Regular, GraphicsUnit.Pixel);
         using var small = new Font("Consolas", 9, FontStyle.Regular, GraphicsUnit.Pixel);
@@ -36,35 +49,49 @@ static class HoloAiScene
         void Right(string text, float y, Color color)
         {
             using var brush = new SolidBrush(color);
-            g.DrawString(text, font, brush, new RectangleF(100, y, 126, 18), right);
+            g.DrawString(text, font, brush, new RectangleF(BarX + 40, y, 226 - BarX - 40, 18), right);
         }
         void Bar(int y, string label, double? pct, int? reset, bool compact = false)
         {
-            Text(label, 14, y, Muted);
+            Text(label, BarX, y, Muted);
             Right(Percent(pct), y, Color.White);
             using var track = new SolidBrush(Track);
-            int barY = compact ? 226 : y + 18;
+            int barY = y + 18;
             int height = compact ? 5 : 6;
-            g.FillRectangle(track, 14, barY, 212, height);
+            g.FillRectangle(track, BarX, barY, BarW, height);
             if (Known(pct))
             {
                 using var fill = new SolidBrush(UsageColor(pct));
-                g.FillRectangle(fill, 14, barY, (int)(212 * Math.Clamp(pct.Value, 0, 100) / 100), height);
+                g.FillRectangle(fill, BarX, barY, (int)(BarW * Math.Clamp(pct.Value, 0, 100) / 100), height);
             }
-            if (!compact) Text("RESET " + Reset(reset), 14, y + 27, Muted, true);
+            if (!compact) Text("RESET " + Reset(reset), BarX, y + 27, Muted, true);
+        }
+        void Pet(Bitmap pet, int boxY)
+        {
+            if (pet == null) return;
+            var state = g.Save();
+            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+            g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.Half;
+            g.DrawImage(pet, PetRect(boxY, pet.Width, pet.Height));
+            g.Restore(state);
+        }
+        void Header(string name, HoloProvider p, int y)
+        {
+            Text(name, BarX, y, Color.White);
+            Right(p.NeedsInput ? "INPUT" : p.Status ?? "unknown", y, p.NeedsInput ? Color.Red : Cyan);
         }
 
         // 依韌體的 240×240 座標繪製；離線狀態明確顯示，避免誤認為即時鏡像。
         Text(connected ? "HOLO / AI MONITOR" : "HOLO / DEVICE OFFLINE", 14, 8, connected ? Cyan : Color.OrangeRed);
         g.DrawLine(line, 14, 29, 226, 29);
-        Text("CLAUDE", 14, 36, Color.White);
-        Right(claude.NeedsInput ? "INPUT" : claude.Status ?? "unknown", 36, Cyan);
+        Pet(claudePet, ClaudePetY);
+        Header("CLAUDE", claude, 36);
         Bar(57, "5H", claude.ShortPct, claude.ShortReset);
-        Bar(99, "7D", claude.WeeklyPct, claude.WeeklyReset);
-        g.DrawLine(line, 14, 138, 226, 138);
-        Text("CODEX", 14, 145, Color.White);
-        Right(codex.NeedsInput ? "INPUT" : codex.Status ?? "unknown", 145, Cyan);
-        Bar(165, "5H", codex.ShortPct, codex.ShortReset);
-        Bar(207, "7D", codex.WeeklyPct, codex.WeeklyReset, true);
+        Bar(96, "7D", claude.WeeklyPct, claude.WeeklyReset);
+        g.DrawLine(line, 14, 136, 226, 136);
+        Pet(codexPet, CodexPetY);
+        Header("CODEX", codex, 142);
+        Bar(162, "5H", codex.ShortPct, codex.ShortReset);
+        Bar(201, "7D", codex.WeeklyPct, codex.WeeklyReset, true);
     }
 }

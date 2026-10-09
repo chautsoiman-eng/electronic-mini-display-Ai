@@ -2038,57 +2038,104 @@ static String holoReset(int minutes) {
   if (minutes >= 60) return String(minutes / 60) + "h " + String(minutes % 60) + "m";
   return String(minutes) + "m";
 }
-static void holoBar(int y, const char *label, float pct, int resetMinutes) {
+// Holo layout: each provider gets a 60x60 pet box on the left (the same
+// built-in or uploaded Claude/Codex animation as the pet pages, at half size)
+// and its quota bars on the right.
+const int HOLO_PET_BOX = 60, HOLO_PET_X = 14, HOLO_CLAUDE_PET_Y = 40, HOLO_CODEX_PET_Y = 146;
+const int HOLO_BAR_X = 84, HOLO_BAR_W = 142;
+
+static void holoBar(int y, const char *label, float pct, int resetMinutes, bool compact = false) {
   const uint16_t muted = tft.color565(113, 151, 164);
-  holoText(label, 14, y, muted);
+  holoText(label, HOLO_BAR_X, y, muted);
   String val = pct < 0 ? "--" : String((int)(constrain(pct, 0.0f, 100.0f) + 0.5f)) + "%";
   tft.setTextDatum(TR_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.drawString(val, 226, y, 2);
   tft.setTextDatum(TL_DATUM);
-  tft.fillRoundRect(14, y + 18, 212, 6, 3, tft.color565(21, 48, 57));
+  int barY = y + 18, barH = compact ? 5 : 6;
+  tft.fillRoundRect(HOLO_BAR_X, barY, HOLO_BAR_W, barH, 2, tft.color565(21, 48, 57));
   if (pct >= 0) {
-    int width = (int)(212.0f * constrain(pct, 0.0f, 100.0f) / 100.0f);
-    if (width > 0) tft.fillRoundRect(14, y + 18, width, 6, 3, holoColor(pct));
+    int width = (int)(HOLO_BAR_W * constrain(pct, 0.0f, 100.0f) / 100.0f);
+    if (width > 0) tft.fillRoundRect(HOLO_BAR_X, barY, width, barH, 2, holoColor(pct));
   }
-  holoText("RESET " + holoReset(resetMinutes), 14, y + 27, muted, 1);
+  if (!compact) holoText("RESET " + holoReset(resetMinutes), HOLO_BAR_X, y + 27, muted, 1);
 }
+
+// Half-size pet: every second row/column of the active frame, centred in the
+// 60x60 box. Streams one row at a time like drawSpriteFrame (no frame buffer).
+void drawHoloPet(bool custom, const char *file, const uint16_t *const *progmemFrames, int frameIdx, int w,
+                 int h, size_t frameBytes, int boxY) {
+  int dw = (w + 1) / 2, dh = (h + 1) / 2;
+  int x0 = HOLO_PET_X + (HOLO_PET_BOX - dw) / 2, y0 = boxY + (HOLO_PET_BOX - dh) / 2;
+  size_t rowBytes = (size_t)w * 2;
+  File f;
+  if (custom) {
+    f = LittleFS.open(file, "r");
+    if (!f) return;
+  }
+  for (int r = 0; r < dh; r++) {
+    size_t offset = (size_t)(r * 2) * w; // pixels into the frame
+    if (custom) {
+      f.seek(1 + (size_t)frameIdx * frameBytes + offset * 2);
+      f.read((uint8_t *)rowBuf, rowBytes);
+    } else {
+      memcpy_P(rowBuf, progmemFrames[frameIdx] + offset, rowBytes);
+    }
+    for (int c = 0; c < dw; c++) rowBuf[c] = rowBuf[c * 2];
+    tft.pushImage(x0, y0 + r, dw, 1, rowBuf);
+  }
+  if (custom) f.close();
+}
+
+void drawHoloClaudePet() {
+  drawHoloPet(claudeCustom, CLAUDE_SPRITE_FILE, claude_sprite_frames, claudeFrame % claudeFrameCount(),
+              CLAUDE_SPRITE_W, CLAUDE_SPRITE_H, CLAUDE_FRAME_BYTES, HOLO_CLAUDE_PET_Y);
+}
+
+void drawHoloCodexPet() {
+  drawHoloPet(codexCustom, CODEX_SPRITE_FILE, codex_sprite_frames, codexFrame % codexFrameCount(),
+              CODEX_SPRITE_W, CODEX_SPRITE_H, CODEX_FRAME_BYTES, HOLO_CODEX_PET_Y);
+}
+
+static void holoHeader(const char *name, const String &status, bool needsInput, int y) {
+  const uint16_t cyan = tft.color565(88, 220, 222);
+  holoText(name, HOLO_BAR_X, y, TFT_WHITE, 2);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(needsInput ? TFT_RED : cyan, TFT_BLACK);
+  tft.drawString(needsInput ? "INPUT" : status, 226, y, 2);
+  tft.setTextDatum(TL_DATUM);
+}
+
 void drawHoloAi() {
   tft.fillScreen(TFT_BLACK);
   // 音樂／股票頁會改對齊方式；每次進入 Holo 都重設，避免標題被裁切。
   tft.setTextDatum(TL_DATUM);
   const uint16_t cyan = tft.color565(88, 220, 222);
-  const uint16_t muted = tft.color565(113, 151, 164);
   holoText("HOLO / AI MONITOR", 14, 8, cyan, 2);
   tft.drawFastHLine(14, 29, 212, tft.color565(24, 71, 82));
-  holoText("CLAUDE", 14, 36, TFT_WHITE, 2);
-  tft.setTextDatum(TR_DATUM);
-  tft.setTextColor(cyan, TFT_BLACK);
-  tft.drawString(claudeStatus.needsInput ? "INPUT" : claudeStatus.status, 226, 36, 2);
-  tft.setTextDatum(TL_DATUM);
+  drawHoloClaudePet();
+  holoHeader("CLAUDE", claudeStatus.status, claudeStatus.needsInput, 36);
   holoBar(57, "5H", claudeStatus.fiveHourPct, claudeStatus.fiveHourResetMin);
-  holoBar(99, "7D", claudeStatus.sevenDayPct, claudeStatus.sevenDayResetMin);
-  tft.drawFastHLine(14, 138, 212, tft.color565(24, 71, 82));
-  holoText("CODEX", 14, 145, TFT_WHITE, 2);
-  tft.setTextDatum(TR_DATUM);
-  tft.setTextColor(cyan, TFT_BLACK);
-  tft.drawString(codexStatus.needsInput ? "INPUT" : codexStatus.status, 226, 145, 2);
-  tft.setTextDatum(TL_DATUM);
-  // Compact rows fit both providers within the native 240px panel.
-  holoBar(165, "5H", codexStatus.primaryPct, codexStatus.primaryResetMin);
-  // Last row uses a reduced layout so it remains fully visible.
-  holoText("7D", 14, 207, muted, 2);
-  String pct = codexStatus.weeklyPct < 0 ? "--" : String((int)(constrain(codexStatus.weeklyPct, 0.0f, 100.0f) + 0.5f)) + "%";
-  tft.setTextDatum(TR_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(pct, 226, 207, 2);
-  tft.setTextDatum(TL_DATUM);
-  tft.fillRoundRect(14, 226, 212, 5, 2, tft.color565(21, 48, 57));
-  if (codexStatus.weeklyPct >= 0) {
-    int width = (int)(212.0f * constrain(codexStatus.weeklyPct, 0.0f, 100.0f) / 100.0f);
-    if (width > 0) tft.fillRoundRect(14, 226, width, 5, 2, holoColor(codexStatus.weeklyPct));
-  }
+  holoBar(96, "7D", claudeStatus.sevenDayPct, claudeStatus.sevenDayResetMin);
+  tft.drawFastHLine(14, 136, 212, tft.color565(24, 71, 82));
+  drawHoloCodexPet();
+  holoHeader("CODEX", codexStatus.status, codexStatus.needsInput, 142);
+  holoBar(162, "5H", codexStatus.primaryPct, codexStatus.primaryResetMin);
+  // Last row drops its reset line so it stays inside the 240px panel.
+  holoBar(201, "7D", codexStatus.weeklyPct, codexStatus.weeklyResetMin, true);
   holoDirty = false;
+}
+
+// Like the pet pages, a pet only walks while its agent is working.
+void holoAnimTick() {
+  if (claudeStatus.status == "working") {
+    claudeFrame = (claudeFrame + 1) % claudeFrameCount();
+    drawHoloClaudePet();
+  }
+  if (codexStatus.status == "working") {
+    codexFrame = (codexFrame + 1) % codexFrameCount();
+    drawHoloCodexPet();
+  }
 }
 
 // First data over either transport replaces the boot/portal screen.
@@ -2434,6 +2481,7 @@ void handleSpriteReset(ActiveApp slot) {
   loadCustomSpriteState();
   if (slot == APP_CLAUDE) claudeFrame = 0;
   else codexFrame = 0;
+  holoDirty = true; // Holo AI shows both pets; repaint it with the new one
   if (currentApp == slot) drawActiveApp();
   webServer.send(200, "text/plain", "ok");
 }
@@ -2661,6 +2709,7 @@ void handleSpriteUploadDone(ActiveApp slot) {
   loadCustomSpriteState();
   if (slot == APP_CLAUDE) claudeFrame = 0;
   else codexFrame = 0;
+  holoDirty = true; // Holo AI shows both pets; repaint it with the new one
   if (currentApp == slot) drawActiveApp();
 
   if (ok) {
@@ -2816,6 +2865,10 @@ void loop() {
     if (holoDirty || nowMs - lastHoloDrawMs >= 30000UL) {
       lastHoloDrawMs = nowMs;
       drawHoloAi();
+    }
+    if (nowMs - lastAnimMs >= ANIM_INTERVAL_MS) {
+      lastAnimMs = nowMs;
+      holoAnimTick();
     }
   } else if (eff == MODE_NET) {
     // net-speed mode: rendering (constant-rate sweep) is independent of the

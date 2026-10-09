@@ -53,6 +53,9 @@ sealed class MirrorControl : Control
     public WeatherSnapshot WeatherData = new();
     public PcTelemetry PcData = new();
     public HoloProvider HoloClaude, HoloCodex;
+    // Holo AI shows both pets at once (half size), each from its own slot.
+    public List<Bitmap> HoloClaudeFrames = new(), HoloCodexFrames = new();
+    public int HoloClaudeIdx, HoloCodexIdx;
     public string MusicTitle = "";
     public string MusicArtist = "";
     public double MusicElapsed;
@@ -139,7 +142,9 @@ sealed class MirrorControl : Control
         }
         if (HoloMode)
         {
-            HoloAiScene.Draw(g, HoloClaude, HoloCodex, DeviceOK);
+            HoloAiScene.Draw(g, HoloClaude, HoloCodex, DeviceOK,
+                HoloClaudeFrames.Count > 0 ? HoloClaudeFrames[HoloClaudeIdx % HoloClaudeFrames.Count] : null,
+                HoloCodexFrames.Count > 0 ? HoloCodexFrames[HoloCodexIdx % HoloCodexFrames.Count] : null);
             return;
         }
         if (NetMode)
@@ -728,7 +733,27 @@ sealed class MirrorForm : Form
 
     void EnsureSprite(DeviceInfo info)
     {
-        if (info.Effective is "clock" or "pc" or "holo_ai" or "net" or "music" or "stock") return;
+        if (info.Effective == "holo_ai")
+        {
+            // both pets on one page: use whatever is cached, fetch the rest
+            foreach (var holoSlot in new[] { "claude", "codex" })
+            {
+                if (_spriteCache.TryGetValue(holoSlot, out var c) && c.Rev == info.SpriteRev)
+                {
+                    if (holoSlot == "claude") _mirror.HoloClaudeFrames = c.Frames;
+                    else _mirror.HoloCodexFrames = c.Frames;
+                }
+                else if (_fetchingSlot == null)
+                {
+                    _fetchingSlot = holoSlot;
+                    _ = FetchSprite(holoSlot, info.SpriteRev,
+                        holoSlot == "claude" ? info.ClaudeW : info.CodexW,
+                        holoSlot == "claude" ? info.ClaudeH : info.CodexH);
+                }
+            }
+            return;
+        }
+        if (info.Effective is "clock" or "weather" or "pc" or "net" or "music" or "stock") return;
         var slot = info.Showing == "codex" ? "codex" : "claude";
         var w = slot == "claude" ? info.ClaudeW : info.CodexW;
         var h = slot == "claude" ? info.ClaudeH : info.CodexH;
@@ -751,9 +776,16 @@ sealed class MirrorForm : Form
             var data = await DeviceClient.FetchSpriteRaw(slot);
             var frames = Rgb565.DecodeSpriteFrames(data, w, h);
             if (frames.Count == 0) return;
-            if (_spriteCache.TryGetValue(slot, out var old))
-                foreach (var f in old.Frames) f.Dispose();
+            _spriteCache.TryGetValue(slot, out var old);
             _spriteCache[slot] = (rev, frames, w, h);
+            // swap every reference to the old frames before disposing them,
+            // so a paint never touches a disposed bitmap
+            if (slot == "claude") _mirror.HoloClaudeFrames = frames;
+            else _mirror.HoloCodexFrames = frames;
+            if (old.Frames != null && _mirror.Frames == old.Frames) _mirror.Frames = frames;
+            if (_mirror.HoloMode) _mirror.Invalidate();
+            if (old.Frames != null)
+                foreach (var f in old.Frames) f.Dispose();
             if ((_lastInfo?.Showing == "codex" ? "codex" : "claude") == slot)
             {
                 _mirror.Frames = frames;
@@ -776,7 +808,26 @@ sealed class MirrorForm : Form
 
     void AnimTick()
     {
-        if (_lastInfo == null || _mirror.ClockMode || _mirror.WeatherMode || _mirror.PcMode || _mirror.NetMode || _mirror.HoloMode || _mirror.MusicMode || _mirror.StockMode) return;
+        if (_lastInfo == null) return;
+        if (_mirror.HoloMode)
+        {
+            // like the device: a pet walks only while its agent is working
+            var s = _service.Snapshot();
+            bool changed = false;
+            if (s.Claude.Status == "working" && _mirror.HoloClaudeFrames.Count > 1)
+            {
+                _mirror.HoloClaudeIdx = (_mirror.HoloClaudeIdx + 1) % _mirror.HoloClaudeFrames.Count;
+                changed = true;
+            }
+            if (s.Codex.Status == "working" && _mirror.HoloCodexFrames.Count > 1)
+            {
+                _mirror.HoloCodexIdx = (_mirror.HoloCodexIdx + 1) % _mirror.HoloCodexFrames.Count;
+                changed = true;
+            }
+            if (changed) _mirror.Invalidate();
+            return;
+        }
+        if (_mirror.ClockMode || _mirror.WeatherMode || _mirror.PcMode || _mirror.NetMode || _mirror.MusicMode || _mirror.StockMode) return;
 
         // ~400ms red-border flash while an approval is pending (device cadence)
         if (_mirror.NeedsInput)
