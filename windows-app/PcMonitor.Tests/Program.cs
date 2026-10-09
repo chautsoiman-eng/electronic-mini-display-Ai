@@ -63,8 +63,16 @@ void Render(string name, PcTelemetry data)
     g.Clear(Color.Black);
     PcMonitorScene.Draw(g, data, true);
     bitmap.Save(Path.Combine(output, $"pc-{name}.png"), ImageFormat.Png);
-    Check(bitmap.GetPixel(20, 58).ToArgb() == (data.Stale || data.CpuPct == null
+    Check(bitmap.Width == 240 && bitmap.Height == 240, name + " native 240x240");
+    Check(bitmap.GetPixel(20, 105).ToArgb() == (data.Stale || data.CpuPct == null
         ? Color.FromArgb(21, 48, 57) : PcMonitorScene.Cyan).ToArgb(), name + " CPU bar");
+    Check(bitmap.GetPixel(130, 105).ToArgb() == (data.Stale || data.GpuPct == null
+        ? Color.FromArgb(21, 48, 57) : Color.OrangeRed).ToArgb(), name + " GPU bar");
+    Check(bitmap.GetPixel(20, 143).ToArgb() == (data.Stale || data.MemPct == null
+        ? Color.FromArgb(21, 48, 57) : PcMonitorScene.Cyan).ToArgb(), name + " RAM bar");
+    for (int y = 232; y < 240; y++)
+        for (int x = 0; x < 240; x++)
+            Check(bitmap.GetPixel(x, y).ToArgb() == Color.Black.ToArgb(), name + " bottom safety margin");
 }
 Render("normal", normal);
 Render("unknown", new PcTelemetry { Stale = false });
