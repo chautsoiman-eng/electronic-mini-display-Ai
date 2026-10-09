@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Management" Version="8.0.0" />
+    <!-- 直接連結正式資料、採樣及繪圖程式；不讀 OAuth 帳號。 -->
+    <Compile Include="../AIClockBridge/Pc*.cs" Link="%(Filename)%(Extension)" />
+    <Compile Include="../AIClockBridge/GpuStatsReader.cs" Link="GpuStatsReader.cs" />
+    <Compile Include="../AIClockBridge/SystemStatsMonitor.cs" Link="SystemStatsMonitor.cs" />
+    <Compile Include="../AIClockBridge/MiniHttpServer.cs" Link="MiniHttpServer.cs" />
+  </ItemGroup>
+</Project>

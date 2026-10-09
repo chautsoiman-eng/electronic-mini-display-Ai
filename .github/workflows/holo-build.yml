@@ -1,0 +1,72 @@
+name: Holo build and render checks
+
+on:
+  push:
+    branches: [feature/holo-dashboard]
+  pull_request:
+    paths:
+      - 'firmware/**'
+      - 'windows-app/**'
+      - '.github/workflows/holo-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install platformio==6.1.19
+      - run: python -m platformio run --project-dir firmware --environment nodemcuv2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nodemcuv2-firmware
+          path: firmware/.pio/build/nodemcuv2/firmware.bin
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - run: dotnet build windows-app/AIClockBridge/AIClockBridge.csproj -c Release
+      - run: dotnet run --project windows-app/HoloAi.Tests/HoloAi.Tests.csproj -c Release -- previews
+      - run: dotnet run --project windows-app/PcMonitor.Tests/PcMonitor.Tests.csproj -c Release -- previews
+      - run: dotnet run --project windows-app/Clock.Tests/Clock.Tests.csproj -c Release -- previews
+      - run: dotnet run --project windows-app/Dashboard.Tests/Dashboard.Tests.csproj -c Release -- previews
+      - run: dotnet run --project windows-app/Petdex.Tests/Petdex.Tests.csproj -c Release
+      - run: dotnet run --project windows-app/Serial.Tests/Serial.Tests.csproj -c Release
+      - name: Audit direct and transitive NuGet dependencies
+        shell: pwsh
+        run: |
+          $report = dotnet list windows-app/AIClockBridge/AIClockBridge.csproj package --vulnerable --include-transitive --format json
+          if ($LASTEXITCODE -ne 0) { throw "NuGet audit failed" }
+          $report | Set-Content nuget-audit.json
+          $audit = $report | ConvertFrom-Json
+          if (@($audit.logs | Where-Object level -eq 'error').Count) { throw "Incomplete audit" }
+          foreach ($project in $audit.projects) {
+            foreach ($framework in $project.frameworks) {
+              if (@($framework.topLevelPackages).Count -or @($framework.transitivePackages).Count) {
+                throw "Known vulnerable dependency"
+              }
+            }
+          }
+      - name: Publish portable Windows app
+        run: dotnet publish windows-app/AIClockBridge/AIClockBridge.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o dist/windows
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-portable
+          path: dist/windows/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: holo-render-previews
+          path: previews/*.png
+          if-no-files-found: error

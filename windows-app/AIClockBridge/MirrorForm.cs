@@ -44,12 +44,25 @@ sealed class MirrorControl : Control
     public StockMonitor.Row[] StockRows = Array.Empty<StockMonitor.Row>();
 
     public bool MusicMode;
+    public bool HoloMode;
+    public bool PcMode;
+    public bool ClockMode;
+    public bool WeatherMode;
+    public bool HorizontalMirror;
+    public long ClockMinute = long.MinValue;
+    public WeatherSnapshot WeatherData = new();
+    public PcTelemetry PcData = new();
+    public HoloProvider HoloClaude, HoloCodex;
+    // Holo AI shows both pets at once (half size), each from its own slot.
+    public List<Bitmap> HoloClaudeFrames = new(), HoloCodexFrames = new();
+    public int HoloClaudeIdx, HoloCodexIdx;
     public string MusicTitle = "";
     public string MusicArtist = "";
     public double MusicElapsed;
     public double MusicDuration;
     public bool MusicPlaying;
     public Bitmap MusicCover;
+    public int[] MusicSpectrum = new int[SpectrumAnalyzer.BarCount];
 
     static readonly Image ClaudeLogo = LoadAsset("claude-logo.png");
     static readonly Image CodexLogo = LoadAsset("codex-logo.png");
@@ -106,7 +119,34 @@ sealed class MirrorControl : Control
             g.FillPath(Brushes.Black, panel);
             g.SetClip(panel);
         }
+        if (HorizontalMirror)
+        {
+            g.TranslateTransform(240, 0);
+            g.ScaleTransform(-1, 1);
+        }
 
+        if (PcMode)
+        {
+            PcMonitorScene.Draw(g, DeviceOK ? PcData : PcData with { Stale = true });
+            return;
+        }
+        if (ClockMode)
+        {
+            ClockScene.Draw(g, ClockScene.FromUtc(DateTimeOffset.UtcNow, WeatherData));
+            return;
+        }
+        if (WeatherMode)
+        {
+            WeatherScene.Draw(g, WeatherData);
+            return;
+        }
+        if (HoloMode)
+        {
+            HoloAiScene.Draw(g, HoloClaude, HoloCodex, DeviceOK,
+                HoloClaudeFrames.Count > 0 ? HoloClaudeFrames[HoloClaudeIdx % HoloClaudeFrames.Count] : null,
+                HoloCodexFrames.Count > 0 ? HoloCodexFrames[HoloCodexIdx % HoloCodexFrames.Count] : null);
+            return;
+        }
         if (NetMode)
         {
             DrawNetScene(g);
@@ -186,47 +226,8 @@ sealed class MirrorControl : Control
 
     void DrawMusicScene(Graphics g)
     {
-        var coverRect = new Rectangle(56, 16, 128, 128);
-        if (MusicCover != null)
-        {
-            var state = g.Save();
-            g.InterpolationMode = InterpolationMode.NearestNeighbor;
-            g.PixelOffsetMode = PixelOffsetMode.Half;
-            g.DrawImage(MusicCover, coverRect);
-            g.Restore(state);
-        }
-        else
-        {
-            using var dark = new SolidBrush(Color.FromArgb(64, 64, 64));
-            g.FillRectangle(dark, coverRect);
-            using var font = new Font("Consolas", 13, FontStyle.Bold, GraphicsUnit.Pixel);
-            using var fmt = new StringFormat { Alignment = StringAlignment.Center };
-            g.DrawString("No Art", font, Brushes.LightGray, new RectangleF(56, 72, 128, 20), fmt);
-        }
-
-        using var titleFmt = new StringFormat
-        {
-            Alignment = StringAlignment.Center,
-            Trimming = StringTrimming.EllipsisCharacter,
-            FormatFlags = StringFormatFlags.NoWrap,
-        };
-        var title = MusicTitle.Length == 0 ? "No Music" : MusicTitle;
-        using (var font = new Font("Microsoft YaHei UI", 15, FontStyle.Bold, GraphicsUnit.Pixel))
-        {
-            g.DrawString(title, font, Brushes.White, new RectangleF(12, 154, 216, 24), titleFmt);
-        }
-        using (var font = new Font("Microsoft YaHei UI", 12, FontStyle.Regular, GraphicsUnit.Pixel))
-        {
-            g.DrawString(MusicArtist, font, Brushes.LightGray,
-                         new RectangleF(12, 178, 216, 20), titleFmt);
-        }
-
-        var bar = new RectangleF(20, 210, 200, 8);
-        using var barBg = new SolidBrush(Color.FromArgb(64, 64, 64));
-        g.FillRectangle(barBg, bar);
-        var frac = MusicDuration > 0 ? (float)Math.Clamp(MusicElapsed / MusicDuration, 0, 1) : 0;
-        using var barFill = new SolidBrush(MusicPlaying ? Green : Color.Gray);
-        g.FillRectangle(barFill, bar.X, bar.Y, bar.Width * frac, bar.Height);
+        MusicScene.Draw(g, MusicTitle, MusicArtist, MusicElapsed, MusicDuration,
+                        MusicPlaying, MusicCover, MusicSpectrum);
     }
 
     /// Replica of the firmware's net-speed screen v2: header readouts, then
@@ -385,11 +386,14 @@ sealed class MirrorForm : Form
     readonly StatusService _service;
     readonly NetSpeedMonitor _netMonitor;
     readonly NowPlayingMonitor _nowPlaying;
+    readonly AudioSpectrumMonitor _spectrum;
     readonly StockMonitor _stockMonitor;
+    readonly PcMonitor _pcMonitor;
+    readonly WeatherMonitor _weather;
     readonly MirrorControl _mirror = new();
     readonly RadioButton[] _modeButtons;
-    static readonly string[] Modes = { "auto", "claude", "codex", "net", "music", "stock" };
-    static readonly string[] ModeLabels = { "自动", "Claude", "Codex", "网速", "音乐", "股票" };
+    static readonly string[] Modes = { "auto", "claude", "codex", "clock", "weather", "net", "music", "stock", "holo_ai", "pc" };
+    static readonly string[] ModeLabels = { "自动", "Claude", "Codex", "时钟", "天气", "网速", "音乐", "股票", "Holo AI", "PC" };
     readonly Label _statusLabel = new();
     readonly TrackBar _brightness = new() { Minimum = 0, Maximum = 100, TickStyle = TickStyle.None };
     readonly Label _brightnessValue = new();
@@ -411,12 +415,16 @@ sealed class MirrorForm : Form
     bool _applyingMode; // suppress CheckedChanged while reflecting device state
 
     public MirrorForm(StatusService service, NetSpeedMonitor netMonitor, NowPlayingMonitor nowPlaying,
-                      StockMonitor stockMonitor)
+                      AudioSpectrumMonitor spectrum, StockMonitor stockMonitor, PcMonitor pcMonitor,
+                      WeatherMonitor weather)
     {
         _service = service;
         _netMonitor = netMonitor;
         _nowPlaying = nowPlaying;
+        _spectrum = spectrum;
         _stockMonitor = stockMonitor;
+        _pcMonitor = pcMonitor;
+        _weather = weather;
 
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
@@ -425,13 +433,15 @@ sealed class MirrorForm : Form
         BackColor = SystemColors.Control;
         Padding = new Padding(1);
 
-        ClientSize = new Size(Px(316), Px(424));
+        ClientSize = new Size(Px(316), Px(456));
 
         _mirror.SetBounds(Px(14), Px(14), Px(288), Px(288));
         Controls.Add(_mirror);
 
         _modeButtons = new RadioButton[Modes.Length];
-        var segWidth = Px(288) / Modes.Length;
+        // 分成兩列，保留標籤寬度，避免新增模式後所有按鈕都過窄。
+        const int columns = 5;
+        var segWidth = Px(288) / columns;
         for (int i = 0; i < Modes.Length; i++)
         {
             var btn = new RadioButton
@@ -442,7 +452,7 @@ sealed class MirrorForm : Form
                 Tag = Modes[i],
                 AutoSize = false,
             };
-            btn.SetBounds(Px(14) + i * segWidth, Px(312), segWidth, Px(28));
+            btn.SetBounds(Px(14) + (i % columns) * segWidth, Px(312 + (i / columns) * 30), segWidth, Px(28));
             btn.CheckedChanged += ModeChanged;
             _modeButtons[i] = btn;
             Controls.Add(btn);
@@ -454,20 +464,20 @@ sealed class MirrorForm : Form
             TextAlign = ContentAlignment.MiddleCenter,
             ForeColor = SystemColors.GrayText,
         };
-        sunLabel.SetBounds(Px(12), Px(346), Px(24), Px(26));
+        sunLabel.SetBounds(Px(12), Px(378), Px(24), Px(26));
         Controls.Add(sunLabel);
-        _brightness.SetBounds(Px(36), Px(346), Px(216), Px(26));
+        _brightness.SetBounds(Px(36), Px(378), Px(216), Px(26));
         _brightness.Scroll += (_, _) => OnBrightnessInput(final: false);
         _brightness.MouseUp += (_, _) => OnBrightnessInput(final: true);
         Controls.Add(_brightness);
-        _brightnessValue.SetBounds(Px(254), Px(346), Px(48), Px(26));
+        _brightnessValue.SetBounds(Px(254), Px(378), Px(48), Px(26));
         _brightnessValue.TextAlign = ContentAlignment.MiddleRight;
         _brightnessValue.ForeColor = SystemColors.GrayText;
         _brightnessValue.Font = new Font("Microsoft YaHei UI", 8.5f);
         _brightnessValue.Text = "100%";
         Controls.Add(_brightnessValue);
 
-        _statusLabel.SetBounds(Px(10), Px(378), Px(296), Px(36));
+        _statusLabel.SetBounds(Px(10), Px(410), Px(296), Px(36));
         _statusLabel.TextAlign = ContentAlignment.MiddleCenter;
         _statusLabel.ForeColor = SystemColors.GrayText;
         _statusLabel.Font = new Font("Microsoft YaHei UI", 8.5f);
@@ -584,13 +594,16 @@ sealed class MirrorForm : Form
             if (!Visible) return;
             _mirror.DeviceOK = false;
             _mirror.Invalidate();
-            _statusLabel.Text = DeviceClient.Host.Length == 0
-                ? "未设置设备地址（右键托盘 → 设置设备地址）" : $"无法连接 {DeviceClient.Host}";
+            _statusLabel.Text = DeviceClient.WiredLinked
+                ? $"USB 有线已连接 {SerialLink.Current?.PortName}（屏幕切换/亮度可用，镜像需 WiFi）"
+                : DeviceClient.Host.Length == 0
+                    ? "未设置设备地址（右键托盘 → 设置设备地址）" : $"无法连接 {DeviceClient.Host}";
             return;
         }
         if (!Visible) return;
         _lastInfo = info;
         _mirror.DeviceOK = true;
+        _mirror.HorizontalMirror = info.HorizontalMirror;
         ApplyScene(info);
         EnsureSprite(info);
         SyncBrightness(info);
@@ -600,6 +613,11 @@ sealed class MirrorForm : Form
         _applyingMode = false;
         var modeText = info.Mode == "auto" ? "自动切换"
             : info.Mode == "net" ? "网速曲线"
+            : info.Mode == "holo_ai" ? "Holo AI 监控"
+            : info.Mode == "pc" ? "PC 监控"
+            : info.Mode == "clock" ? "时钟"
+            : info.Mode == "weather" ? "天气"
+            : info.Mode == "stock" ? "股票行情"
             : info.Mode == "music" ? "音乐播放" : "固定显示";
         _statusLabel.Text = $"{info.Ip} · {modeText} · 数据 {info.Bridge}";
     }
@@ -613,6 +631,44 @@ sealed class MirrorForm : Form
         _mirror.NetMode = info.Effective == "net";
         _mirror.MusicMode = info.Effective == "music";
         _mirror.StockMode = info.Effective == "stock";
+        _mirror.HoloMode = info.Effective == "holo_ai";
+        _mirror.PcMode = info.Effective == "pc";
+        _mirror.ClockMode = info.Effective == "clock";
+        _mirror.WeatherMode = info.Effective == "weather";
+        _mirror.WeatherData = _weather.Snapshot;
+        if (_mirror.ClockMode)
+        {
+            var minute = ClockScene.FromUtc(DateTimeOffset.UtcNow).MinuteKey;
+            if (_mirror.ClockMinute != minute)
+            {
+                _mirror.ClockMinute = minute;
+                _mirror.Invalidate();
+            }
+            return;
+        }
+        if (_mirror.WeatherMode)
+        {
+            _mirror.Invalidate();
+            return;
+        }
+        if (_mirror.PcMode)
+        {
+            _mirror.PcData = _pcMonitor.Snapshot();
+            _mirror.Invalidate();
+            return;
+        }
+        if (_mirror.HoloMode)
+        {
+            var status = _service.Snapshot();
+            var c = status.Claude;
+            var x = status.Codex;
+            _mirror.HoloClaude = new(c.Status, c.NeedsInput, c.FiveHourPct, c.FiveHourResetMin,
+                c.SevenDayPct, c.SevenDayResetMin);
+            _mirror.HoloCodex = new(x.Status, x.NeedsInput, x.PrimaryPct, x.PrimaryResetMin,
+                x.WeeklyPct, x.WeeklyResetMin);
+            _mirror.Invalidate();
+            return;
+        }
         if (_mirror.StockMode)
         {
             _mirror.StockRows = _stockMonitor.Snapshot;
@@ -633,6 +689,7 @@ sealed class MirrorForm : Form
             _mirror.MusicElapsed = s.Elapsed;
             _mirror.MusicDuration = s.Duration;
             _mirror.MusicPlaying = s.Playing;
+            _mirror.MusicSpectrum = _spectrum.Levels;
             _mirror.MusicCover?.Dispose();
             var cover = _nowPlaying.CoverRgb565;
             _mirror.MusicCover = cover.Length > 0 ? Rgb565.Decode(cover, 0, 128, 128) : null;
@@ -676,6 +733,27 @@ sealed class MirrorForm : Form
 
     void EnsureSprite(DeviceInfo info)
     {
+        if (info.Effective == "holo_ai")
+        {
+            // both pets on one page: use whatever is cached, fetch the rest
+            foreach (var holoSlot in new[] { "claude", "codex" })
+            {
+                if (_spriteCache.TryGetValue(holoSlot, out var c) && c.Rev == info.SpriteRev)
+                {
+                    if (holoSlot == "claude") _mirror.HoloClaudeFrames = c.Frames;
+                    else _mirror.HoloCodexFrames = c.Frames;
+                }
+                else if (_fetchingSlot == null)
+                {
+                    _fetchingSlot = holoSlot;
+                    _ = FetchSprite(holoSlot, info.SpriteRev,
+                        holoSlot == "claude" ? info.ClaudeW : info.CodexW,
+                        holoSlot == "claude" ? info.ClaudeH : info.CodexH);
+                }
+            }
+            return;
+        }
+        if (info.Effective is "clock" or "weather" or "pc" or "net" or "music" or "stock") return;
         var slot = info.Showing == "codex" ? "codex" : "claude";
         var w = slot == "claude" ? info.ClaudeW : info.CodexW;
         var h = slot == "claude" ? info.ClaudeH : info.CodexH;
@@ -698,9 +776,16 @@ sealed class MirrorForm : Form
             var data = await DeviceClient.FetchSpriteRaw(slot);
             var frames = Rgb565.DecodeSpriteFrames(data, w, h);
             if (frames.Count == 0) return;
-            if (_spriteCache.TryGetValue(slot, out var old))
-                foreach (var f in old.Frames) f.Dispose();
+            _spriteCache.TryGetValue(slot, out var old);
             _spriteCache[slot] = (rev, frames, w, h);
+            // swap every reference to the old frames before disposing them,
+            // so a paint never touches a disposed bitmap
+            if (slot == "claude") _mirror.HoloClaudeFrames = frames;
+            else _mirror.HoloCodexFrames = frames;
+            if (old.Frames != null && _mirror.Frames == old.Frames) _mirror.Frames = frames;
+            if (_mirror.HoloMode) _mirror.Invalidate();
+            if (old.Frames != null)
+                foreach (var f in old.Frames) f.Dispose();
             if ((_lastInfo?.Showing == "codex" ? "codex" : "claude") == slot)
             {
                 _mirror.Frames = frames;
@@ -723,7 +808,26 @@ sealed class MirrorForm : Form
 
     void AnimTick()
     {
-        if (_lastInfo == null || _mirror.NetMode) return;
+        if (_lastInfo == null) return;
+        if (_mirror.HoloMode)
+        {
+            // like the device: a pet walks only while its agent is working
+            var s = _service.Snapshot();
+            bool changed = false;
+            if (s.Claude.Status == "working" && _mirror.HoloClaudeFrames.Count > 1)
+            {
+                _mirror.HoloClaudeIdx = (_mirror.HoloClaudeIdx + 1) % _mirror.HoloClaudeFrames.Count;
+                changed = true;
+            }
+            if (s.Codex.Status == "working" && _mirror.HoloCodexFrames.Count > 1)
+            {
+                _mirror.HoloCodexIdx = (_mirror.HoloCodexIdx + 1) % _mirror.HoloCodexFrames.Count;
+                changed = true;
+            }
+            if (changed) _mirror.Invalidate();
+            return;
+        }
+        if (_mirror.ClockMode || _mirror.WeatherMode || _mirror.PcMode || _mirror.NetMode || _mirror.MusicMode || _mirror.StockMode) return;
 
         // ~400ms red-border flash while an approval is pending (device cadence)
         if (_mirror.NeedsInput)

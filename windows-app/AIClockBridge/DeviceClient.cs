@@ -21,6 +21,7 @@ class DeviceInfo
     public int LastUpdateS = -1;       // seconds since the device last got /status data, -1 = never
     public int SpriteRev;              // bumped by the device on animation change
     public int Brightness = 100;       // backlight 0-100 (0 = off)
+    public bool HorizontalMirror;
     public bool ClaudeCustomSprite;
     public bool CodexCustomSprite;
     public int ClaudeW = 111, ClaudeH = 120;
@@ -99,6 +100,7 @@ static class DeviceClient
                 LastUpdateS = Int(root, "last_update_s", -1),
                 SpriteRev = Int(root, "sprite_rev"),
                 Brightness = Int(root, "brightness", 100),
+                HorizontalMirror = Bool(root, "mirror_horizontal"),
                 Showing = Str(root, "showing"),
             };
             info.Effective = Str(root, "effective", info.Mode);
@@ -122,9 +124,10 @@ static class DeviceClient
         }
     }
 
-    /// POST /api/display  mode=auto|claude|codex|net|music
+    /// POST /api/display  mode=auto|claude|codex|clock|weather|net|music|stock|holo_ai|pc
     public static Task SetDisplayMode(string mode) =>
-        PostForm("api/display", new() { ["mode"] = mode });
+        WiredFirst(SerialProtocol.Command(display: mode),
+            () => PostForm("api/display", new() { ["mode"] = mode }));
 
     /// POST /api/bridge  host=ip:port
     public static Task SetBridgeHost(string bridgeHost) =>
@@ -132,7 +135,22 @@ static class DeviceClient
 
     /// POST /api/brightness  level=0-100 (0 = backlight off); device persists it
     public static Task SetBrightness(int level) =>
-        PostForm("api/brightness", new() { ["level"] = level.ToString() });
+        WiredFirst(SerialProtocol.Command(brightness: level),
+            () => PostForm("api/brightness", new() { ["level"] = level.ToString() }));
+
+    /// POST /api/mirror enabled=0|1; device persists it.
+    public static Task SetHorizontalMirror(bool enabled) =>
+        WiredFirst(SerialProtocol.Command(mirror: enabled),
+            () => PostForm("api/mirror", new() { ["enabled"] = enabled ? "1" : "0" }));
+
+    /// True while the clock is handshaken over USB serial.
+    public static bool WiredLinked => SerialLink.Current?.IsLinked == true;
+
+    /// Display/brightness/mirror go over USB #CMD when the clock is plugged in
+    /// (instant, and works with no WiFi or AP isolation; the firmware applies
+    /// and persists them exactly like the HTTP API), otherwise over HTTP.
+    static Task WiredFirst(byte[] command, Func<Task> http) =>
+        SerialLink.Current?.TrySend(command) == true ? Task.CompletedTask : http();
 
     /// POST /sprite/{claude|codex}  multipart GIF upload — the device decodes
     /// and rescales the GIF on-board, then swaps the animation immediately.

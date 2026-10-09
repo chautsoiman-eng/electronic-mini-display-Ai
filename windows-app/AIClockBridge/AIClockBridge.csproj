@@ -2,7 +2,7 @@
 
   <!-- Windows port of mac-app/: same tray-icon bridge (status server, screen
        mirror, quota, net speed, now-playing, petdex picker). WinForms + WinRT
-       media APIs; ImageSharp is the one third-party dep, needed because
+       media APIs; Magick.NET provides image conversion, needed because
        System.Drawing cannot decode petdex's WebP spritesheets nor author
        multi-frame GIFs. EnableWindowsTargeting lets the project compile on
        non-Windows hosts too (CI / cross-checks); it only runs on Windows. -->
@@ -14,13 +14,24 @@
     <Nullable>disable</Nullable>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <NuGetAuditMode>all</NuGetAuditMode>
+    <WarningsAsErrors>$(WarningsAsErrors);NU1901;NU1902;NU1903;NU1904</WarningsAsErrors>
     <AssemblyName>AIClockBridge</AssemblyName>
     <RootNamespace>AIClockBridge</RootNamespace>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
+    <PackageReference Include="Magick.NET-Q8-AnyCPU" Version="14.17.2" GeneratePathProperty="true" />
+    <PackageReference Include="NAudio" Version="2.4.0" />
+    <PackageReference Include="System.IO.Ports" Version="8.0.0" />
+    <PackageReference Include="System.Management" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 隨可攜式程式保留原生圖片函式庫與其依賴的授權公告。 -->
+    <None Include="$(PkgMagick_NET-Q8-AnyCPU)/Notice.txt" Link="Magick.NET-Notice.txt"
+          CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
   </ItemGroup>
 
   <ItemGroup>

@@ -15,6 +15,8 @@
 #include <ArduinoJson.h>
 #include <TFT_eSPI.h>
 #include <AnimatedGIF.h>
+#include <time.h>
+#include <sys/time.h>
 
 #include "config.h"
 #include "img/claude_sprite.h"
@@ -73,14 +75,53 @@ unsigned long lastSwitchMs = 0;
 // Display override, settable from the Mac app via POST /api/display:
 // auto = follow working status, claude/codex = pin that app on screen,
 // net/music = show Mac-side telemetry pages instead of the pet.
-enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_NET, MODE_MUSIC, MODE_STOCK };
+enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_CLOCK, MODE_WEATHER, MODE_NET, MODE_MUSIC, MODE_STOCK, MODE_HOLO_AI, MODE_PC };
 DisplayMode displayMode = MODE_AUTO;
+
+DisplayMode effectiveMode();
+
+// 只有寵物模式可重畫角色；上傳／重設圖片不可覆蓋 Holo 或其他資訊頁。
+bool isPetMode(DisplayMode mode) {
+  return mode == MODE_AUTO || mode == MODE_CLAUDE || mode == MODE_CODEX;
+}
 
 // When AUTO and the Mac reports audio playing, the screen auto-switches to the
 // music page and back when it stops — same spirit as the Claude/Codex auto
 // switch. Only AUTO does this; a pinned mode is always honored as-is.
 bool statusMusicPlaying = false;
+unsigned long lastHoloDrawMs = 0;
+bool holoDirty = true;
 DisplayMode lastEffectiveMode = MODE_AUTO;
+
+// ---------- clock mode state ----------
+// ESP8266 system time keeps advancing after Wi-Fi drops. We only regard it as
+// synchronized after SNTP has supplied a plausible epoch.
+bool clockSyncStarted = false;
+bool clockChromeDrawn = false;
+bool clockLastSynced = false;
+int clockLastMinute = -2;
+int clockLastYearDay = -2;
+unsigned long lastClockCheckMs = 0;
+
+// Live weather comes from the Windows bridge. Missing or stale data stays
+// explicit as -- and never substitutes fixture data.
+struct ClockWeather {
+  bool temperatureValid = false;
+  int temperatureC = 0;
+  int apparentC = 0;
+  int humidityPct = -1;
+  int windKph = -1;
+  int weatherCode = -1;
+  String condition;
+  String location = "TAIPEI";
+};
+ClockWeather clockWeather;
+bool weatherDirty = true;
+unsigned long lastWeatherPollMs = 0;
+const unsigned long WEATHER_POLL_INTERVAL_MS = 10UL * 60UL * 1000UL;
+// Wired bridges push #WEATHER; while those are fresh, HTTP /weather polling is skipped.
+unsigned long weatherSerialMs = 0;
+bool weatherSerialSeen = false;
 
 // ---------- net speed mode state ----------
 // Rendering is decoupled from the network: pollNet() fetches every 2s and
@@ -148,6 +189,7 @@ int musicArtworkRev = -1;
 int musicTextRev = -1;
 bool musicHasArtwork = false;
 bool musicChromeDrawn = false;
+int musicSpectrum[24] = {0};
 unsigned long lastMusicPollMs = 0;
 
 int claudeFrame = 0;
@@ -197,6 +239,7 @@ bool webServerStarted = false; // deferred: port 80 clashes with the portal
 // firmware does the same. 0 = off, 100 = full. Persisted so it survives reboot.
 
 int brightness = BRIGHTNESS_DEFAULT; // 0-100
+bool mirrorHorizontal = false;
 
 void applyBrightness() {
   // analogWriteRange(100) is set in setup(), so the duty value is just the
@@ -217,6 +260,29 @@ void saveBrightness() {
   File f = LittleFS.open(BRIGHTNESS_FILE, "w");
   if (!f) return;
   f.println(brightness);
+  f.close();
+}
+
+// Rotation 0 normally writes only the color-order bit. MX flips the native
+// 240x240 address space horizontally, so every scene and streamed bitmap is
+// mirrored consistently without allocating another frame buffer.
+void applyHorizontalMirror() {
+  tft.writecommand(TFT_MADCTL);
+  tft.writedata((mirrorHorizontal ? TFT_MAD_MX : 0) | TFT_MAD_COLOR_ORDER);
+}
+
+void loadHorizontalMirror() {
+  if (!LittleFS.exists(MIRROR_FILE)) return;
+  File f = LittleFS.open(MIRROR_FILE, "r");
+  if (!f) return;
+  mirrorHorizontal = f.readStringUntil('\n').toInt() == 1;
+  f.close();
+}
+
+void saveHorizontalMirror() {
+  File f = LittleFS.open(MIRROR_FILE, "w");
+  if (!f) return;
+  f.println(mirrorHorizontal ? 1 : 0);
   f.close();
 }
 
@@ -812,6 +878,7 @@ float claudeRingPct() {
 // Full clear + repaint - only for real transitions (app switch, mode return,
 // sprite change); steady-state data updates go through refreshActiveApp().
 void drawActiveApp() {
+  if (!isPetMode(effectiveMode())) return;
   tft.fillScreen(TFT_BLACK);
   ringLastPct = -1000; // screen was cleared: force the ring repaint
   showingCd = desiredCountdown();
@@ -834,6 +901,7 @@ void drawActiveApp() {
 // In-place refresh after a bridge poll: ring repaint + only the text that
 // actually changed. No fillScreen, so the 5s poll doesn't blank the screen.
 void refreshActiveApp() {
+  if (!isPetMode(effectiveMode())) return;
   if (desiredCountdown() != showingCd) { // pet <-> countdown (or 5h <-> weekly) swap
     drawActiveApp();
     return;
@@ -1244,7 +1312,7 @@ void drawMusicTextFallback() {
 }
 
 // Regions repaint independently: cover / text strip only when their rev
-// changes, progress bar + time on every poll (partial fill, no flicker
+// changes, spectrum + progress bar on every poll (partial fill, no flicker
 // elsewhere).
 void drawMusicScreen(bool coverChanged, bool textChanged) {
   if (!musicChromeDrawn) {
@@ -1260,17 +1328,23 @@ void drawMusicScreen(bool coverChanged, bool textChanged) {
     if (!drawMusicTextFromBridge()) drawMusicTextFallback();
   }
 
-  const int bx = 20, by = 204, bw = 200, bh = 8;
-  tft.fillRect(0, by - 2, SCREEN_W, SCREEN_H - by + 2, TFT_BLACK);
+  const int spectrumY = 198;
+  tft.fillRect(0, spectrumY, SCREEN_W, SCREEN_H - spectrumY, TFT_BLACK);
+  const uint16_t spectrumBg = tft.color565(22, 54, 62);
+  for (int i = 0; i < 24; i++) {
+    int level = constrain(musicSpectrum[i], 0, 100);
+    int h = level * 28 / 100;
+    int x = 8 + i * 9;
+    tft.fillRect(x, 201, 6, 28, spectrumBg);
+    if (h > 0) tft.fillRect(x, 229 - h, 6, h, TFT_GREEN);
+  }
+  const int bx = 8, by = 233, bw = 224, bh = 3;
   tft.fillRect(bx, by, bw, bh, TFT_DARKGREY);
   float progress = musicDuration > 0 ? (float)musicElapsed / (float)musicDuration : 0;
   if (progress < 0) progress = 0;
   if (progress > 1) progress = 1;
   uint16_t color = musicPlaying ? TFT_GREEN : TFT_LIGHTGREY;
   tft.fillRect(bx, by, (int)(bw * progress), bh, color);
-  tft.setTextDatum(TC_DATUM);
-  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  tft.drawString(timeText(musicElapsed) + " / " + timeText(musicDuration), SCREEN_CX, 220, 1);
 }
 
 void pollMusic() {
@@ -1298,6 +1372,9 @@ void pollMusic() {
       int tRev = doc["text_rev"] | -1;
       bool textChanged = tRev != musicTextRev;
       musicTextRev = tRev;
+      JsonArray spectrum = doc["spectrum"];
+      for (int i = 0; i < 24; i++)
+        musicSpectrum[i] = i < (int)spectrum.size() ? constrain(spectrum[i].as<int>(), 0, 100) : 0;
       drawMusicScreen(coverChanged, textChanged);
     }
   }
@@ -1531,6 +1608,17 @@ DisplayMode effectiveMode() {
   return displayMode;
 }
 
+// HTTP 與 USB 共用更新路徑；模式切換交給 loop，避免在舊頁上局部重畫。
+void refreshStatusDisplay() {
+  DisplayMode eff = effectiveMode();
+  if (eff == MODE_HOLO_AI) {
+    holoDirty = true;
+  } else if (eff == lastEffectiveMode && isPetMode(eff)) {
+    if (updateActiveApp()) drawActiveApp();
+    else refreshActiveApp();
+  }
+}
+
 void pollBridge() {
   if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) {
     Serial.printf("[bridge] skip poll: wifi=%d host='%s'\n", WiFi.status() == WL_CONNECTED, bridgeHost.c_str());
@@ -1564,21 +1652,366 @@ void pollBridge() {
     codexStatus.status = "offline";
   }
   http.end();
-  DisplayMode eff = effectiveMode();
-  if (eff != MODE_NET && eff != MODE_MUSIC && eff != MODE_STOCK) {
-    // Only a real app switch clears the screen; a plain data refresh paints
-    // in place so the poll doesn't flash the whole display.
-    if (updateActiveApp()) drawActiveApp();
-    else refreshActiveApp();
+  refreshStatusDisplay();
+}
+
+// ---------- Clock / NTP ----------
+void startClockSync() {
+  if (clockSyncStarted || WiFi.status() != WL_CONNECTED) return;
+  configTime(CLOCK_TIMEZONE, CLOCK_NTP_SERVER_1, CLOCK_NTP_SERVER_2);
+  clockSyncStarted = true;
+  Serial.printf("[clock] SNTP started, timezone=%s\n", CLOCK_TIMEZONE);
+}
+
+// Wired-only clocks never reach NTP, so the USB bridge sends #TIME {"epoch":N}.
+// SNTP stays authoritative: serial time is applied only while SNTP is not
+// running or has not produced a valid time yet.
+bool applySerialTime(uint32_t epoch) {
+  if (epoch < 1609459200UL) return false;
+  if (clockSyncStarted && time(nullptr) >= 1609459200) return false;
+  setenv("TZ", CLOCK_TIMEZONE, 1);
+  tzset();
+  struct timeval tv = {(time_t)epoch, 0};
+  settimeofday(&tv, nullptr);
+  return true;
+}
+
+bool clockLocalTime(struct tm &local) {
+  time_t now = time(nullptr);
+  // 2021-01-01: a boot-relative or zero epoch must never appear as real time.
+  if (now < 1609459200) return false;
+  localtime_r(&now, &local);
+  return true;
+}
+
+void drawClockChrome() {
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextDatum(TL_DATUM);
+  const uint16_t cyan = tft.color565(88, 220, 222);
+  const uint16_t muted = tft.color565(113, 151, 164);
+  const uint16_t grid = tft.color565(24, 71, 82);
+  tft.setTextColor(cyan, TFT_BLACK);
+  tft.drawString("CLOCK", 14, 8, 2);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(muted, TFT_BLACK);
+  tft.drawString(CLOCK_TIMEZONE_LABEL, 226, 9, 1);
+  tft.drawFastHLine(14, 29, 212, grid);
+  tft.drawFastHLine(14, 178, 212, grid);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString("WEATHER", 14, 187, 1);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  bool validTemp = clockWeather.temperatureValid &&
+                   clockWeather.temperatureC >= -90 && clockWeather.temperatureC <= 70;
+  String temp = validTemp ? String(clockWeather.temperatureC) + "C" : "--";
+  tft.drawString(temp, 14, 201, 4);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(cyan, TFT_BLACK);
+  String condition = clockWeather.condition.length() ? clockWeather.condition : "WEATHER --";
+  condition.toUpperCase();
+  if (condition.length() > 14) condition = condition.substring(0, 14);
+  tft.drawString(condition, 226, 205, 2);
+  clockChromeDrawn = true;
+}
+
+void drawClockDynamic(bool force = false) {
+  if (!clockChromeDrawn) drawClockChrome();
+  struct tm local;
+  bool synced = clockLocalTime(local);
+  int minute = synced ? local.tm_min : -1;
+  int yearDay = synced ? local.tm_yday : -1;
+  if (!force && synced == clockLastSynced && minute == clockLastMinute &&
+      yearDay == clockLastYearDay) return;
+  clockLastSynced = synced;
+  clockLastMinute = minute;
+  clockLastYearDay = yearDay;
+
+  const uint16_t cyan = tft.color565(88, 220, 222);
+  // Only erase the changing time/date region; chrome and weather do not flash.
+  tft.fillRect(8, 38, 224, 134, TFT_BLACK);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  if (!synced) {
+    tft.drawString("--:--", 120, 74, 6);
+    tft.drawString("---- -- --", 120, 125, 2);
+    tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+    tft.drawString("WAITING FOR NTP", 120, 153, 2);
+    return;
+  }
+
+  char timeText[6], dateText[11];
+  strftime(timeText, sizeof(timeText), "%H:%M", &local);
+  strftime(dateText, sizeof(dateText), "%Y-%m-%d", &local);
+  static const char *weekdays[] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
+  tft.drawString(timeText, 120, 74, 6);
+  tft.drawString(dateText, 120, 125, 4);
+  tft.setTextColor(cyan, TFT_BLACK);
+  tft.drawString(weekdays[local.tm_wday], 120, 153, 2);
+}
+
+// ---------- Weather ----------
+bool handleWeatherPayload(const String &payload) {
+  JsonDocument doc;
+  if (deserializeJson(doc, payload)) return false;
+  bool valid = doc["valid"] | false;
+  clockWeather.temperatureValid = valid && doc["temperature_c"].is<float>();
+  if (clockWeather.temperatureValid)
+    clockWeather.temperatureC = (int)round(doc["temperature_c"].as<float>());
+  clockWeather.apparentC = doc["apparent_c"].is<float>()
+      ? (int)round(doc["apparent_c"].as<float>()) : 0;
+  clockWeather.humidityPct = doc["humidity_pct"].is<int>() ? doc["humidity_pct"].as<int>() : -1;
+  clockWeather.windKph = doc["wind_kph"].is<float>()
+      ? (int)round(doc["wind_kph"].as<float>()) : -1;
+  clockWeather.weatherCode = doc["weather_code"].is<int>() ? doc["weather_code"].as<int>() : -1;
+  clockWeather.condition = valid ? String((const char *)(doc["condition"] | "")) : "";
+  clockWeather.location = String((const char *)(doc["location"] | "TAIPEI"));
+  weatherDirty = true;
+  // Clock chrome owns the weather footer; rebuild it after fresh data.
+  clockChromeDrawn = false;
+  return true;
+}
+
+void pollWeather() {
+  if (weatherSerialSeen && millis() - weatherSerialMs < 2UL * WEATHER_POLL_INTERVAL_MS) return;
+  if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return;
+  WiFiClient client;
+  HTTPClient http;
+  String url = "http://" + bridgeHost + "/weather";
+  http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
+  if (!http.begin(client, url)) return;
+  int code = http.GET();
+  if (code == HTTP_CODE_OK) handleWeatherPayload(http.getString());
+  http.end();
+}
+
+String weatherValue(bool valid, int value, const String &suffix) {
+  return valid ? String(value) + suffix : "--";
+}
+
+void drawWeatherSun(int x, int y, int r) {
+  uint16_t yellow = tft.color565(255, 204, 0);
+  tft.fillCircle(x, y, r, yellow);
+  for (int i = 0; i < 8; i++) {
+    float a = i * PI / 4.0f;
+    tft.drawLine(x + cos(a) * (r + 4), y + sin(a) * (r + 4),
+                 x + cos(a) * (r + 10), y + sin(a) * (r + 10), yellow);
   }
 }
 
+void drawWeatherCloud(int x, int y) {
+  uint16_t cloud = tft.color565(192, 220, 226);
+  tft.fillCircle(x - 9, y + 2, 12, cloud);
+  tft.fillCircle(x + 7, y - 6, 15, cloud);
+  tft.fillCircle(x + 22, y + 3, 10, cloud);
+  tft.fillRect(x - 20, y + 2, 52, 15, cloud);
+}
+
+void drawWeatherIcon(int code, int x, int y) {
+  const uint16_t cyan = tft.color565(88, 220, 222);
+  const uint16_t yellow = tft.color565(255, 204, 0);
+  if (code == 0) {
+    drawWeatherSun(x, y, 12);
+  } else if (code == 1 || code == 2) {
+    drawWeatherSun(x - 10, y - 10, 9);
+    drawWeatherCloud(x + 1, y + 5);
+  } else if (code == 3) {
+    drawWeatherCloud(x, y);
+  } else if (code == 45 || code == 48) {
+    for (int i = -1; i <= 1; i++) tft.drawFastHLine(x - 25, y + i * 10, 50, cyan);
+  } else {
+    drawWeatherCloud(x, y - 8);
+    bool rain = (code >= 51 && code <= 67) || (code >= 80 && code <= 82);
+    bool snow = (code >= 71 && code <= 77) || code == 85 || code == 86;
+    bool thunder = code == 95 || code == 96 || code == 99;
+    if (rain) {
+      for (int i = -1; i <= 1; i++) tft.drawLine(x + i * 15, y + 16, x + i * 15 - 5, y + 27, cyan);
+    } else if (snow) {
+      for (int i = -1; i <= 1; i++) {
+        tft.drawFastHLine(x + i * 15 - 4, y + 22, 9, TFT_WHITE);
+        tft.drawFastVLine(x + i * 15, y + 18, 9, TFT_WHITE);
+      }
+    } else if (thunder) {
+      tft.drawLine(x + 2, y + 12, x - 5, y + 25, yellow);
+      tft.drawLine(x - 5, y + 25, x + 3, y + 25, yellow);
+      tft.drawLine(x + 3, y + 25, x - 3, y + 36, yellow);
+    }
+  }
+}
+
+void drawWeatherScreen() {
+  const uint16_t cyan = tft.color565(88, 220, 222);
+  const uint16_t muted = tft.color565(113, 151, 164);
+  const uint16_t grid = tft.color565(24, 71, 82);
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(cyan, TFT_BLACK);
+  tft.drawString("WEATHER", 14, 8, 2);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(muted, TFT_BLACK);
+  String place = clockWeather.location.length() ? clockWeather.location : "TAIPEI";
+  if (place.length() > 14) place = place.substring(0, 14);
+  tft.drawString(place, 226, 9, 1);
+  tft.drawFastHLine(14, 29, 212, grid);
+
+  if (clockWeather.temperatureValid) drawWeatherIcon(clockWeather.weatherCode, 58, 78);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(weatherValue(clockWeather.temperatureValid, clockWeather.temperatureC, "C"),
+                 clockWeather.temperatureValid ? 160 : 120, 78, 6);
+  tft.setTextColor(clockWeather.temperatureValid ? cyan : TFT_ORANGE, TFT_BLACK);
+  String condition = clockWeather.temperatureValid ? clockWeather.condition : "WAITING FOR DATA";
+  condition.toUpperCase();
+  if (condition.length() > 20) condition = condition.substring(0, 20);
+  tft.drawString(condition, 120, 130, 2);
+  tft.drawFastHLine(14, 155, 212, grid);
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(muted, TFT_BLACK);
+  tft.drawString("FEELS LIKE", 14, 169, 2);
+  tft.drawString("HUMIDITY", 14, 194, 2);
+  tft.drawString("WIND", 14, 219, 2);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(weatherValue(clockWeather.temperatureValid, clockWeather.apparentC, "C"), 226, 169, 2);
+  tft.drawString(weatherValue(clockWeather.temperatureValid && clockWeather.humidityPct >= 0,
+                              clockWeather.humidityPct, "%"), 226, 194, 2);
+  tft.drawString(weatherValue(clockWeather.temperatureValid && clockWeather.windKph >= 0,
+                              clockWeather.windKph, " KM/H"), 226, 219, 2);
+  weatherDirty = false;
+}
+
+// ---------- PC monitor ----------
+const unsigned long PC_POLL_MS = 1000;
+const unsigned long PC_STALE_MS = 5000;
+float pcCpu = -1, pcGpu = -1, pcMem = -1;
+float pcCpuTemp = -1000, pcGpuTemp = -1000;
+float pcHistory[60];
+int pcHistoryCount = 0;
+bool pcLoaded = false, pcDirty = true, pcSourceStale = true, pcLastDrawStale = true;
+bool pcSerialSeen = false;
+unsigned long pcLastRxMs = 0, pcLastSerialMs = 0, lastPcPollMs = 0;
+int64_t pcTs = -1, pcSeq = -1;
+
+// 未知／異常數值維持 sentinel，絕不畫成 0%。
+float pcNumber(JsonVariantConst value, float low, float high, float missing) {
+  if (!value.is<float>()) return missing;
+  float n = value.as<float>();
+  return isfinite(n) && n >= low && n <= high ? n : missing;
+}
+
+bool handlePcPayload(const String &payload) {
+  JsonDocument doc;
+  if (deserializeJson(doc, payload)) return false;
+  if (!doc["ts"].is<int64_t>() || !doc["seq"].is<int64_t>() ||
+      !doc["stale"].is<bool>() || !doc["cpu_history"].is<JsonArray>() ||
+      (doc["interval_ms"] | 0) != 1000) return false;
+  JsonArray history = doc["cpu_history"];
+  if (history.size() > 60) return false;
+  int64_t ts = doc["ts"].as<int64_t>(), seq = doc["seq"].as<int64_t>();
+  if (ts < 0 || seq < 0) return false;
+  // 重複快照不延長新鮮度；bridge 重啟後 ts/seq 的新組合仍可恢復。
+  if (!pcLoaded || ts != pcTs || seq != pcSeq) pcLastRxMs = millis();
+  pcTs = ts; pcSeq = seq;
+  pcCpu = pcNumber(doc["cpu_pct"], 0, 100, -1);
+  pcGpu = pcNumber(doc["gpu_pct"], 0, 100, -1);
+  pcMem = pcNumber(doc["mem_pct"], 0, 100, -1);
+  pcCpuTemp = pcNumber(doc["cpu_temp_c"], -20, 150, -1000);
+  pcGpuTemp = pcNumber(doc["gpu_temp_c"], -20, 150, -1000);
+  pcHistoryCount = history.size();
+  for (int i = 0; i < pcHistoryCount; i++) pcHistory[i] = pcNumber(history[i], 0, 100, -1);
+  pcLoaded = true;
+  pcSourceStale = doc["stale"].as<bool>();
+  pcDirty = true;
+  return true;
+}
+
+bool pcStale() { return !pcLoaded || pcSourceStale || millis() - pcLastRxMs > PC_STALE_MS; }
+
+void pollPc() {
+  if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return;
+  WiFiClient client;
+  HTTPClient http;
+  http.setTimeout(1000);
+  if (!http.begin(client, "http://" + bridgeHost + "/pc")) return;
+  int code = http.GET();
+  if (code == HTTP_CODE_OK) handlePcPayload(http.getString());
+  http.end();
+}
+
+void drawPcScreen() {
+  bool stale = pcStale();
+  pcLastDrawStale = stale;
+  pcDirty = false;
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextDatum(TL_DATUM);
+  const uint16_t cyan = tft.color565(88, 220, 222);
+  const uint16_t muted = tft.color565(113, 151, 164);
+  const uint16_t grid = tft.color565(24, 71, 82);
+  const uint16_t track = tft.color565(21, 48, 57);
+
+  // Same native 240x240 coordinates as Windows PcMonitorScene.Draw().
+  // Bottom 12px remain empty to avoid clipping on the panel.
+  tft.setTextColor(cyan, TFT_BLACK);
+  tft.drawString("PC MONITOR", 14, 8, 2);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(stale ? TFT_ORANGE : cyan, TFT_BLACK);
+  tft.drawString(stale ? "STALE" : "LIVE", 226, 8, 2);
+  tft.drawFastHLine(14, 29, 212, grid);
+
+  const int colX[] = {14, 126};
+  const int colW[] = {98, 100};
+  const char *labels[] = {"CPU", "GPU MAX"};
+  float pct[] = {stale ? -1 : pcCpu, stale ? -1 : pcGpu};
+  float temps[] = {stale ? -1000 : pcCpuTemp, stale ? -1000 : pcGpuTemp};
+  for (int i = 0; i < 2; i++) {
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(muted, TFT_BLACK);
+    tft.drawString(labels[i], colX[i], 37, 2);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString(pct[i] < 0 ? "--" : String((int)(pct[i] + .5f)) + "%", colX[i], 55, 4);
+    tft.setTextColor(muted, TFT_BLACK);
+    tft.drawString("TEMP " + (temps[i] < -20 ? String("--") :
+                   String((int)roundf(temps[i])) + "C"), colX[i], 87, 1);
+    tft.fillRect(colX[i], 103, colW[i], 6, track);
+    if (pct[i] > 0) {
+      int fill = (int)(colW[i] * pct[i] / 100);
+      tft.fillRect(colX[i], 103, fill, 6, pct[i] >= 90 ? TFT_ORANGE : cyan);
+    }
+  }
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(muted, TFT_BLACK);
+  tft.drawString("RAM", 14, 119, 2);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  float ram = stale ? -1 : pcMem;
+  tft.drawString(ram < 0 ? "--" : String((int)(ram + .5f)) + "%", 226, 119, 2);
+  tft.fillRect(14, 141, 212, 6, track);
+  if (ram > 0) tft.fillRect(14, 141, (int)(212 * ram / 100),
+                             6, ram >= 90 ? TFT_ORANGE : cyan);
+
+  tft.drawFastHLine(14, 158, 212, grid);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(muted, TFT_BLACK);
+  tft.drawString("CPU HISTORY", 14, 164, 2);
+  tft.setTextDatum(TR_DATUM);
+  tft.drawString("60s", 226, 164, 2);
+  for (int y = 188; y <= 226; y += 19) tft.drawFastHLine(14, y, 212, grid);
+  // Missing points break the line; history stays in the 188..226 chart.
+  for (int i = 1; i < pcHistoryCount; i++) {
+    if (pcHistory[i - 1] < 0 || pcHistory[i] < 0) continue;
+    int x0 = 14 + (60 - pcHistoryCount + i - 1) * 212 / 59;
+    int x1 = 14 + (60 - pcHistoryCount + i) * 212 / 59;
+    tft.drawLine(x0, 226 - (int)(pcHistory[i - 1] * .38f),
+                 x1, 226 - (int)(pcHistory[i] * .38f), cyan);
+  }
+}
 // ---------- wired (USB serial) bridge link ----------
 // Fallback for WiFi networks with client isolation (device can't reach the
 // bridge over LAN) - or for skipping WiFi setup entirely: when the clock is
 // plugged into the computer over USB, the bridge pushes the same /status and
 // /net payloads down the CH340 serial line as newline-terminated frames:
-//   bridge -> device:  #HELLO   #STATUS {json}   #NET {json}   #CMD {json}
+//   bridge -> device:  #HELLO   #STATUS {json}   #NET {json}   #STOCK {json}
+//                      #PC {json}   #WEATHER {json}   #TIME {"epoch":N}   #CMD {json}
 //   device -> bridge:  #DEVICE {"name":"aiclock","fw":"x.y.z"}
 // Everything else the device prints (logs) is ignored by the bridge.
 unsigned long lastSerialFrameMs = 0;
@@ -1587,6 +2020,123 @@ char serialLine[1600]; // biggest frame is #STATUS at ~600 bytes
 size_t serialLineLen = 0;
 
 bool wiredActive() { return wiredEverLinked && (millis() - lastSerialFrameMs) < 15000UL; }
+
+// ---------- Holo AI monitor ----------
+static uint16_t holoColor(float pct) {
+  if (pct < 0) return TFT_DARKGREY;
+  if (pct >= 90) return TFT_RED;
+  if (pct >= 70) return TFT_ORANGE;
+  return tft.color565(88, 220, 222);
+}
+static void holoText(const String &s, int x, int y, uint16_t color, int font=2) {
+  tft.setTextColor(color, TFT_BLACK);
+  tft.drawString(s, x, y, font);
+}
+static String holoReset(int minutes) {
+  if (minutes < 0) return "--";
+  if (minutes >= 1440) return String(minutes / 1440) + "d " + String((minutes % 1440) / 60) + "h";
+  if (minutes >= 60) return String(minutes / 60) + "h " + String(minutes % 60) + "m";
+  return String(minutes) + "m";
+}
+// Holo layout: each provider gets a 60x60 pet box on the left (the same
+// built-in or uploaded Claude/Codex animation as the pet pages, at half size)
+// and its quota bars on the right.
+const int HOLO_PET_BOX = 60, HOLO_PET_X = 14, HOLO_CLAUDE_PET_Y = 40, HOLO_CODEX_PET_Y = 146;
+const int HOLO_BAR_X = 84, HOLO_BAR_W = 142;
+
+static void holoBar(int y, const char *label, float pct, int resetMinutes, bool compact = false) {
+  const uint16_t muted = tft.color565(113, 151, 164);
+  holoText(label, HOLO_BAR_X, y, muted);
+  String val = pct < 0 ? "--" : String((int)(constrain(pct, 0.0f, 100.0f) + 0.5f)) + "%";
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(val, 226, y, 2);
+  tft.setTextDatum(TL_DATUM);
+  int barY = y + 18, barH = compact ? 5 : 6;
+  tft.fillRoundRect(HOLO_BAR_X, barY, HOLO_BAR_W, barH, 2, tft.color565(21, 48, 57));
+  if (pct >= 0) {
+    int width = (int)(HOLO_BAR_W * constrain(pct, 0.0f, 100.0f) / 100.0f);
+    if (width > 0) tft.fillRoundRect(HOLO_BAR_X, barY, width, barH, 2, holoColor(pct));
+  }
+  if (!compact) holoText("RESET " + holoReset(resetMinutes), HOLO_BAR_X, y + 27, muted, 1);
+}
+
+// Half-size pet: every second row/column of the active frame, centred in the
+// 60x60 box. Streams one row at a time like drawSpriteFrame (no frame buffer).
+void drawHoloPet(bool custom, const char *file, const uint16_t *const *progmemFrames, int frameIdx, int w,
+                 int h, size_t frameBytes, int boxY) {
+  int dw = (w + 1) / 2, dh = (h + 1) / 2;
+  int x0 = HOLO_PET_X + (HOLO_PET_BOX - dw) / 2, y0 = boxY + (HOLO_PET_BOX - dh) / 2;
+  size_t rowBytes = (size_t)w * 2;
+  File f;
+  if (custom) {
+    f = LittleFS.open(file, "r");
+    if (!f) return;
+  }
+  for (int r = 0; r < dh; r++) {
+    size_t offset = (size_t)(r * 2) * w; // pixels into the frame
+    if (custom) {
+      f.seek(1 + (size_t)frameIdx * frameBytes + offset * 2);
+      f.read((uint8_t *)rowBuf, rowBytes);
+    } else {
+      memcpy_P(rowBuf, progmemFrames[frameIdx] + offset, rowBytes);
+    }
+    for (int c = 0; c < dw; c++) rowBuf[c] = rowBuf[c * 2];
+    tft.pushImage(x0, y0 + r, dw, 1, rowBuf);
+  }
+  if (custom) f.close();
+}
+
+void drawHoloClaudePet() {
+  drawHoloPet(claudeCustom, CLAUDE_SPRITE_FILE, claude_sprite_frames, claudeFrame % claudeFrameCount(),
+              CLAUDE_SPRITE_W, CLAUDE_SPRITE_H, CLAUDE_FRAME_BYTES, HOLO_CLAUDE_PET_Y);
+}
+
+void drawHoloCodexPet() {
+  drawHoloPet(codexCustom, CODEX_SPRITE_FILE, codex_sprite_frames, codexFrame % codexFrameCount(),
+              CODEX_SPRITE_W, CODEX_SPRITE_H, CODEX_FRAME_BYTES, HOLO_CODEX_PET_Y);
+}
+
+static void holoHeader(const char *name, const String &status, bool needsInput, int y) {
+  const uint16_t cyan = tft.color565(88, 220, 222);
+  holoText(name, HOLO_BAR_X, y, TFT_WHITE, 2);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(needsInput ? TFT_RED : cyan, TFT_BLACK);
+  tft.drawString(needsInput ? "INPUT" : status, 226, y, 2);
+  tft.setTextDatum(TL_DATUM);
+}
+
+void drawHoloAi() {
+  tft.fillScreen(TFT_BLACK);
+  // 音樂／股票頁會改對齊方式；每次進入 Holo 都重設，避免標題被裁切。
+  tft.setTextDatum(TL_DATUM);
+  const uint16_t cyan = tft.color565(88, 220, 222);
+  holoText("HOLO / AI MONITOR", 14, 8, cyan, 2);
+  tft.drawFastHLine(14, 29, 212, tft.color565(24, 71, 82));
+  drawHoloClaudePet();
+  holoHeader("CLAUDE", claudeStatus.status, claudeStatus.needsInput, 36);
+  holoBar(57, "5H", claudeStatus.fiveHourPct, claudeStatus.fiveHourResetMin);
+  holoBar(96, "7D", claudeStatus.sevenDayPct, claudeStatus.sevenDayResetMin);
+  tft.drawFastHLine(14, 136, 212, tft.color565(24, 71, 82));
+  drawHoloCodexPet();
+  holoHeader("CODEX", codexStatus.status, codexStatus.needsInput, 142);
+  holoBar(162, "5H", codexStatus.primaryPct, codexStatus.primaryResetMin);
+  // Last row drops its reset line so it stays inside the 240px panel.
+  holoBar(201, "7D", codexStatus.weeklyPct, codexStatus.weeklyResetMin, true);
+  holoDirty = false;
+}
+
+// Like the pet pages, a pet only walks while its agent is working.
+void holoAnimTick() {
+  if (claudeStatus.status == "working") {
+    claudeFrame = (claudeFrame + 1) % claudeFrameCount();
+    drawHoloClaudePet();
+  }
+  if (codexStatus.status == "working") {
+    codexFrame = (codexFrame + 1) % codexFrameCount();
+    drawHoloCodexPet();
+  }
+}
 
 // First data over either transport replaces the boot/portal screen.
 void showMainUiIfNeeded() {
@@ -1609,11 +2159,7 @@ void handleSerialFrame(char *line) {
       lastSuccessMs = millis();
       everPolled = true;
       showMainUiIfNeeded();
-      DisplayMode eff = effectiveMode();
-      if (eff != MODE_NET && eff != MODE_MUSIC && eff != MODE_STOCK) {
-        if (updateActiveApp()) drawActiveApp();
-        else refreshActiveApp();
-      }
+      refreshStatusDisplay();
     }
     return;
   }
@@ -1623,6 +2169,27 @@ void handleSerialFrame(char *line) {
   }
   if (!strncmp(line, "#STOCK ", 7)) {
     handleStockPayload(String(line + 7));
+    return;
+  }
+  if (!strncmp(line, "#TIME ", 6)) {
+    JsonDocument doc;
+    if (deserializeJson(doc, line + 6)) return;
+    if (doc["epoch"].is<uint32_t>()) applySerialTime(doc["epoch"].as<uint32_t>());
+    return;
+  }
+  if (!strncmp(line, "#WEATHER ", 9)) {
+    if (handleWeatherPayload(String(line + 9))) {
+      weatherSerialSeen = true;
+      weatherSerialMs = millis();
+    }
+    return;
+  }
+  if (!strncmp(line, "#PC ", 4)) {
+    if (handlePcPayload(String(line + 4))) {
+      pcSerialSeen = true;
+      pcLastSerialMs = millis();
+      showMainUiIfNeeded();
+    }
     return;
   }
   if (!strncmp(line, "#CMD ", 5)) {
@@ -1639,10 +2206,20 @@ void handleSerialFrame(char *line) {
       if (m == "auto") displayMode = MODE_AUTO;
       else if (m == "claude") displayMode = MODE_CLAUDE;
       else if (m == "codex") displayMode = MODE_CODEX;
+      else if (m == "clock") displayMode = MODE_CLOCK;
+      else if (m == "weather") displayMode = MODE_WEATHER;
       else if (m == "net") displayMode = MODE_NET;
       else if (m == "music") displayMode = MODE_MUSIC;
       else if (m == "stock") displayMode = MODE_STOCK;
+      else if (m == "holo_ai") displayMode = MODE_HOLO_AI;
+      else if (m == "pc") displayMode = MODE_PC;
       // the effectiveMode transition handler in loop() repaints the chrome
+    }
+    if (doc["mirror"].is<bool>()) {
+      mirrorHorizontal = doc["mirror"].as<bool>();
+      applyHorizontalMirror();
+      saveHorizontalMirror();
+      lastEffectiveMode = (DisplayMode)-1;
     }
     return;
   }
@@ -1762,9 +2339,13 @@ void handleSave() {
 const char *displayModeName(DisplayMode m) {
   if (m == MODE_CLAUDE) return "claude";
   if (m == MODE_CODEX) return "codex";
+  if (m == MODE_CLOCK) return "clock";
+  if (m == MODE_WEATHER) return "weather";
   if (m == MODE_NET) return "net";
   if (m == MODE_MUSIC) return "music";
   if (m == MODE_STOCK) return "stock";
+  if (m == MODE_HOLO_AI) return "holo_ai";
+  if (m == MODE_PC) return "pc";
   return "auto";
 }
 
@@ -1780,8 +2361,11 @@ void handleApiInfo() {
   doc["last_update_s"] = everPolled ? (long)((millis() - lastSuccessMs) / 1000) : -1;
   doc["sprite_rev"] = spriteRev;
   doc["brightness"] = brightness;
+  doc["mirror_horizontal"] = mirrorHorizontal;
   doc["wired"] = wiredActive(); // true = data currently arrives over USB serial
   doc["fw"] = FW_VERSION;
+  doc["clock_synced"] = time(nullptr) >= 1609459200;
+  doc["clock_timezone"] = CLOCK_TIMEZONE_LABEL;
   JsonObject c = doc["claude"].to<JsonObject>();
   c["status"] = claudeStatus.status;
   c["custom_sprite"] = claudeCustom;
@@ -1802,27 +2386,19 @@ void handleApiDisplay() {
   if (mode == "auto") displayMode = MODE_AUTO;
   else if (mode == "claude") displayMode = MODE_CLAUDE;
   else if (mode == "codex") displayMode = MODE_CODEX;
+  else if (mode == "clock") displayMode = MODE_CLOCK;
+  else if (mode == "weather") displayMode = MODE_WEATHER;
   else if (mode == "net") displayMode = MODE_NET;
   else if (mode == "music") displayMode = MODE_MUSIC;
   else if (mode == "stock") displayMode = MODE_STOCK;
+  else if (mode == "holo_ai") displayMode = MODE_HOLO_AI;
+  else if (mode == "pc") displayMode = MODE_PC;
   else {
-    webServer.send(400, "text/plain", "mode must be auto|claude|codex|net|music|stock");
+    webServer.send(400, "text/plain", "mode must be auto|claude|codex|clock|weather|net|music|stock|holo_ai|pc");
     return;
   }
   Serial.printf("[api] display mode = %s\n", mode.c_str());
-  if (displayMode == MODE_NET) {
-    netChromeDrawn = false;
-    lastNetPollMs = 0; // poll + draw on the next loop tick
-  } else if (displayMode == MODE_MUSIC) {
-    musicChromeDrawn = false;
-    lastMusicPollMs = 0; // poll + draw on the next loop tick
-  } else if (displayMode == MODE_STOCK) {
-    stockChromeDrawn = false;
-    lastStockPollMs = 0; // poll + draw on the next loop tick
-  } else {
-    updateActiveApp();
-    drawActiveApp(); // unconditional: also repaints over a previous net chart
-  }
+  // 與 USB 指令一致，由 loop 依實際模式重畫；AUTO 可能仍是音樂頁。
   webServer.send(200, "text/plain", "ok");
 }
 
@@ -1839,6 +2415,18 @@ void handleApiBrightness() {
   applyBrightness();
   saveBrightness();
   Serial.printf("[api] brightness = %d\n", brightness);
+  webServer.send(200, "text/plain", "ok");
+}
+
+void handleApiMirror() {
+  if (!webServer.hasArg("enabled")) {
+    webServer.send(400, "text/plain", "missing enabled (0|1)");
+    return;
+  }
+  mirrorHorizontal = webServer.arg("enabled") == "1" || webServer.arg("enabled") == "true";
+  applyHorizontalMirror();
+  saveHorizontalMirror();
+  lastEffectiveMode = (DisplayMode)-1; // force a clean repaint in the new address direction
   webServer.send(200, "text/plain", "ok");
 }
 
@@ -1893,6 +2481,7 @@ void handleSpriteReset(ActiveApp slot) {
   loadCustomSpriteState();
   if (slot == APP_CLAUDE) claudeFrame = 0;
   else codexFrame = 0;
+  holoDirty = true; // Holo AI shows both pets; repaint it with the new one
   if (currentApp == slot) drawActiveApp();
   webServer.send(200, "text/plain", "ok");
 }
@@ -2120,6 +2709,7 @@ void handleSpriteUploadDone(ActiveApp slot) {
   loadCustomSpriteState();
   if (slot == APP_CLAUDE) claudeFrame = 0;
   else codexFrame = 0;
+  holoDirty = true; // Holo AI shows both pets; repaint it with the new one
   if (currentApp == slot) drawActiveApp();
 
   if (ok) {
@@ -2139,6 +2729,7 @@ void setupWebServer() {
   webServer.on("/api/display", HTTP_POST, handleApiDisplay);
   webServer.on("/api/bridge", HTTP_POST, handleApiBridge);
   webServer.on("/api/brightness", HTTP_POST, handleApiBrightness);
+  webServer.on("/api/mirror", HTTP_POST, handleApiMirror);
   webServer.on("/sprite/claude/reset", HTTP_POST, []() { handleSpriteReset(APP_CLAUDE); });
   webServer.on("/sprite/codex/reset", HTTP_POST, []() { handleSpriteReset(APP_CODEX); });
   webServer.on("/sprite/claude/raw", HTTP_GET, []() { handleSpriteRaw(APP_CLAUDE); });
@@ -2161,10 +2752,12 @@ void setup() {
   LittleFS.begin();
   loadBridgeHost();
   loadBrightness();
+  loadHorizontalMirror();
   loadCustomSpriteState();
 
   tft.init();
   tft.setRotation(0);
+  applyHorizontalMirror();
   tft.fillScreen(TFT_BLACK);
   analogWriteFreq(BRIGHTNESS_PWM_FREQ);
   analogWriteRange(100); // duty maps 1:1 to a 0-100 percentage
@@ -2173,6 +2766,7 @@ void setup() {
   setupWiFi();
 
   if (WiFi.status() == WL_CONNECTED) {
+    startClockSync();
     setupWebServer();
     webServerStarted = true;
 
@@ -2199,6 +2793,7 @@ void loop() {
   if (!webServerStarted && WiFi.status() == WL_CONNECTED) {
     // WiFi came up after boot (portal or slow AP); the portal has released
     // port 80 by now, so the admin server can bind it
+    startClockSync();
     setupWebServer();
     webServerStarted = true;
     showMainUiIfNeeded();
@@ -2215,7 +2810,21 @@ void loop() {
   DisplayMode eff = effectiveMode();
   if (eff != lastEffectiveMode) {
     lastEffectiveMode = eff;
-    if (eff == MODE_NET) {
+    if (eff == MODE_CLOCK) {
+      clockChromeDrawn = false;
+      clockLastMinute = -2;
+      clockLastYearDay = -2;
+      drawClockDynamic(true);
+      lastWeatherPollMs = 0;
+    } else if (eff == MODE_WEATHER) {
+      weatherDirty = true;
+      lastWeatherPollMs = 0;
+    } else if (eff == MODE_PC) {
+      pcDirty = true;
+      lastPcPollMs = nowMs - PC_POLL_MS;
+    } else if (eff == MODE_HOLO_AI) {
+      holoDirty = true;
+    } else if (eff == MODE_NET) {
       netChromeDrawn = false;
       lastNetPollMs = 0;
     } else if (eff == MODE_MUSIC) {
@@ -2230,7 +2839,38 @@ void loop() {
     }
   }
 
-  if (eff == MODE_NET) {
+  if (eff == MODE_CLOCK) {
+    if (nowMs - lastWeatherPollMs >= WEATHER_POLL_INTERVAL_MS || lastWeatherPollMs == 0) {
+      lastWeatherPollMs = nowMs;
+      pollWeather();
+    }
+    if (nowMs - lastClockCheckMs >= 1000UL) {
+      lastClockCheckMs = nowMs;
+      drawClockDynamic();
+    }
+  } else if (eff == MODE_WEATHER) {
+    if (nowMs - lastWeatherPollMs >= WEATHER_POLL_INTERVAL_MS || lastWeatherPollMs == 0) {
+      lastWeatherPollMs = nowMs;
+      pollWeather();
+    }
+    if (weatherDirty) drawWeatherScreen();
+  } else if (eff == MODE_PC) {
+    if (nowMs - lastPcPollMs >= PC_POLL_MS) {
+      lastPcPollMs = nowMs;
+      // 只有 #PC 能抑制 PC HTTP 輪詢；單獨 #STATUS 不應讓 PC 頁失去資料。
+      if (!pcSerialSeen || nowMs - pcLastSerialMs > PC_STALE_MS) pollPc();
+    }
+    if (pcDirty || pcLastDrawStale != pcStale()) drawPcScreen();
+  } else if (eff == MODE_HOLO_AI) {
+    if (holoDirty || nowMs - lastHoloDrawMs >= 30000UL) {
+      lastHoloDrawMs = nowMs;
+      drawHoloAi();
+    }
+    if (nowMs - lastAnimMs >= ANIM_INTERVAL_MS) {
+      lastAnimMs = nowMs;
+      holoAnimTick();
+    }
+  } else if (eff == MODE_NET) {
     // net-speed mode: rendering (constant-rate sweep) is independent of the
     // bridge polls that refill its sample queue
     if (nowMs - lastNetDrawMs >= NET_DRAW_INTERVAL_MS) {

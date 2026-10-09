@@ -8,9 +8,11 @@ namespace AIClockBridge;
 // 0.0.0.0:<port>. Raw TcpListener instead of HttpListener because binding
 // HttpListener to non-localhost prefixes needs an admin urlacl — a plain
 // socket doesn't (only the usual firewall prompt on first run).
-sealed class MiniHttpServer
+sealed class MiniHttpServer : IDisposable
 {
     readonly int _port;
+    readonly IPAddress _bindAddress;
+    public int BoundPort => ((IPEndPoint)_listener.LocalEndpoint).Port;
     readonly Dictionary<string, Func<byte[]>> _routes;
     readonly Dictionary<string, Func<byte[]>> _binaryRoutes;
     readonly Dictionary<string, Func<byte[], byte[]>> _postRoutes;
@@ -24,9 +26,11 @@ sealed class MiniHttpServer
     public MiniHttpServer(int port,
                           Dictionary<string, Func<byte[]>> routes,
                           Dictionary<string, Func<byte[]>> binaryRoutes = null,
-                          Dictionary<string, Func<byte[], byte[]>> postRoutes = null)
+                          Dictionary<string, Func<byte[], byte[]>> postRoutes = null,
+                          IPAddress bindAddress = null)
     {
         _port = port;
+        _bindAddress = bindAddress ?? IPAddress.Any;
         _routes = routes;
         _binaryRoutes = binaryRoutes ?? new();
         _postRoutes = postRoutes ?? new();
@@ -34,7 +38,7 @@ sealed class MiniHttpServer
 
     public void Start()
     {
-        _listener = new TcpListener(IPAddress.Any, _port);
+        _listener = new TcpListener(_bindAddress, _port);
         _listener.Start();
         Task.Run(AcceptLoop);
     }
@@ -55,6 +59,9 @@ sealed class MiniHttpServer
             _ = Task.Run(() => Handle(client));
         }
     }
+
+    // 測試可使用 localhost 隨機埠，結束時立即釋放 listener。
+    public void Dispose() => _listener?.Stop();
 
     async Task Handle(TcpClient client)
     {
