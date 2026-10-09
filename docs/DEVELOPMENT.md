@@ -197,7 +197,7 @@ pio device monitor -b 115200
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/info` | 设备状态 JSON：ip/ssid/bridge/显示模式/当前显示/自定义精灵标记 |
-| POST | `/api/display` | `mode=auto\|claude\|codex\|clock\|weather\|net\|music\|stock\|holo_ai\|pc` 切换屏幕显示 |
+| POST | `/api/display` | `mode=auto\|claude\|codex\|clock\|weather\|net\|music\|holo_ai\|pc` 切换屏幕显示 |
 | POST | `/api/mirror` | `enabled=0\|1` 設定並保存 45° 全息用水平鏡像 |
 | POST | `/api/bridge` | `host=ip:port` 设置桥接地址 |
 | POST | `/sprite/claude`、`/sprite/codex` | multipart 上传 GIF 并板上解码替换 |

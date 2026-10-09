@@ -26,9 +26,10 @@ This branch develops a 240×240 ST7789 HoloCubic-style interface for the SD2 ESP
 - [x] Windows Holo AI menu, mirror preview, and render regression checks.
 - [ ] AI Monitor physical-device validation (USB device not connected on the development PC).
 - [x] PC telemetry, local Windows preview and firmware monitor screen (hardware validation pending).
-- [ ] Weather bridge and screen.
-- [ ] Clock and time sync.
-- [ ] WASAPI spectrum transport and display.
-- [ ] Horizontal mirror rendering and physical-device validation.
+- [x] Weather bridge and screen (hardware validation pending).
+- [x] Clock and time sync, incl. USB `#TIME` for wired-only clocks (hardware validation pending).
+- [x] WASAPI spectrum transport and display (hardware validation pending).
+- [x] Horizontal mirror rendering.
+- [ ] Physical-device validation of all screens (device not yet delivered).
 
 Build and device-validation instructions: [Holo verification](docs/HOLO_VERIFICATION.md).

@@ -5,7 +5,7 @@ namespace AIClockBridge;
 
 // Wire format of the USB serial link (same as mac-app/SerialLink.swift and
 // firmware handleSerialFrame): newline-terminated ASCII frames.
-//   bridge -> device:  #HELLO  #STATUS {json}  #NET {json}  #STOCK {json}
+//   bridge -> device:  #HELLO  #STATUS {json}  #NET {json}
 //                      #PC {json}  #WEATHER {json}  #TIME {"epoch":N}  #CMD {json}
 //   device -> bridge:  #DEVICE {"name":"aiclock","fw":"x.y.z"}
 // Kept free of System.IO.Ports so the framing can be tested without hardware.

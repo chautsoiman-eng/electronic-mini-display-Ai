@@ -24,7 +24,7 @@ GitHub Actions 的 `Holo build and render checks` 會建置韌體、Windows app 
 1. 接上電子鐘，執行 `python -m serial.tools.list_ports -v`，確認 CH340 的 COM 埠後，以 `python -m platformio run -d firmware -e nodemcuv2 -t upload --upload-port COMx` 燒錄（替換 COMx，勿使用內建 COM1）。
 2. Windows 托盤「屏幕显示」選 Holo AI，確認 Claude／Codex 各兩條 bar 與未知值 `--`，鏡像視窗亦顯示 Holo。
 3. 以 HTTP `POST /api/display` 的 `mode=holo_ai` 及 USB `#CMD {"display":"holo_ai"}` 分別切換；持續收到 `#STATUS` 時不得出現寵物圖案。
-4. 從音樂、網速、股票切入 Holo，再切回各模式；確認 Holo 標題左對齊、AUTO 音樂播放／停止與審批優先切換正常。在 Holo 上傳／重設寵物圖片，不應覆蓋 Holo。
+4. 從音樂、網速切入 Holo，再切回各模式；確認 Holo 標題左對齊、AUTO 音樂播放／停止與審批優先切換正常。在 Holo 上傳／重設寵物圖片，不應覆蓋 Holo。
 5. 拔除裝置後 Windows 鏡像顯示 DEVICE OFFLINE；重接後恢復。另需在實機觀察長時間刷新、WiFi 配網與 LittleFS 圖片保存。
 
 PC 監控、時鐘、天氣頁、音訊 FFT 與水平鏡像均已完成（見 `docs/HANDOFF_2026-10-09.md`）；仍待實機驗證。

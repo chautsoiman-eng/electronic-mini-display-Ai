@@ -124,7 +124,7 @@ static class DeviceClient
         }
     }
 
-    /// POST /api/display  mode=auto|claude|codex|clock|weather|net|music|stock|holo_ai|pc
+    /// POST /api/display  mode=auto|claude|codex|clock|weather|net|music|holo_ai|pc
     public static Task SetDisplayMode(string mode) =>
         WiredFirst(SerialProtocol.Command(display: mode),
             () => PostForm("api/display", new() { ["mode"] = mode }));

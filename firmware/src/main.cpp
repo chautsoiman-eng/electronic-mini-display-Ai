@@ -75,7 +75,7 @@ unsigned long lastSwitchMs = 0;
 // Display override, settable from the Mac app via POST /api/display:
 // auto = follow working status, claude/codex = pin that app on screen,
 // net/music = show Mac-side telemetry pages instead of the pet.
-enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_CLOCK, MODE_WEATHER, MODE_NET, MODE_MUSIC, MODE_STOCK, MODE_HOLO_AI, MODE_PC };
+enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_CLOCK, MODE_WEATHER, MODE_NET, MODE_MUSIC, MODE_HOLO_AI, MODE_PC };
 DisplayMode displayMode = MODE_AUTO;
 
 DisplayMode effectiveMode();
@@ -159,29 +159,6 @@ const int MUSIC_TEXT_W = 232;
 const int MUSIC_TEXT_H = 44;
 const int MUSIC_TEXT_X = 4, MUSIC_TEXT_Y = 150;
 const unsigned long MUSIC_POLL_INTERVAL_MS = 2000;
-// ---------- stock watchlist mode state ----------
-// Rows come pre-formatted from the bridge (GET /stock or serial #STOCK):
-// ASCII code + price/pct strings + up flag, so the firmware just paints.
-const unsigned long STOCK_POLL_INTERVAL_MS = 5000;
-const int MAX_STOCKS = 4;
-struct StockRow {
-  String code, price, pct;
-  int up = 0; // 1 rising (red, CN convention) / -1 falling (green) / 0 flat
-};
-StockRow stocks[MAX_STOCKS];
-int stockCount = 0;
-bool stockEverLoaded = false;
-bool stockDirty = false;
-bool stockChromeDrawn = false;
-String stockLastCode[MAX_STOCKS]; // top line (code + CJK name strip)
-String stockLastVal[MAX_STOCKS];  // value line (price + pct)
-unsigned long lastStockPollMs = 0;
-// CJK names come as Mac-rendered RGB565 strips (GET /stock/names.raw, one
-// 156x16 strip per row) - names_rev says when to re-fetch. -1 = not drawn.
-const int STOCK_NAME_W = 156, STOCK_NAME_H = 16;
-int stockNamesRev = -1;
-int stockNamesDrawnRev = -1;
-
 String musicTitle, musicArtist, musicAlbum;
 bool musicPlaying = false;
 int musicElapsed = 0, musicDuration = 0;
@@ -1381,147 +1358,6 @@ void pollMusic() {
   http.end();
 }
 
-// ---------- stock watchlist screen ----------
-
-bool handleStockPayload(const String &payload) {
-  JsonDocument doc;
-  if (deserializeJson(doc, payload)) return false;
-  JsonArray arr = doc["stocks"];
-  stockCount = 0;
-  for (JsonObject s : arr) {
-    if (stockCount >= MAX_STOCKS) break;
-    stocks[stockCount].code = s["code"] | "";
-    stocks[stockCount].price = s["price"] | "";
-    stocks[stockCount].pct = s["pct"] | "";
-    stocks[stockCount].up = s["up"] | 0;
-    stockCount++;
-  }
-  stockNamesRev = doc["names_rev"] | -1;
-  stockEverLoaded = true;
-  stockDirty = true;
-  return true;
-}
-
-// Streams the Mac-rendered name strips and blits one per row (top line,
-// right of the ASCII code). Wired-only mode has no HTTP: codes still show.
-bool drawStockNames() {
-  if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return false;
-  WiFiClient client;
-  HTTPClient http;
-  String url = "http://" + bridgeHost + "/stock/names.raw";
-  http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
-  if (!http.begin(client, url)) return false;
-  int code = http.GET();
-  if (code != HTTP_CODE_OK) {
-    http.end();
-    return false;
-  }
-  WiFiClient *stream = http.getStreamPtr();
-  uint8_t cnt = 0;
-  if (stream->readBytes(&cnt, 1) != 1) {
-    http.end();
-    return false;
-  }
-  const size_t rowBytes = (size_t)STOCK_NAME_W * 2;
-  bool ok = true;
-  for (int i = 0; i < cnt && ok; i++) {
-    int y0 = 10 + i * 54;
-    for (int r = 0; r < STOCK_NAME_H; r++) {
-      if (stream->readBytes((uint8_t *)rowBuf, rowBytes) != (int)rowBytes) {
-        ok = false;
-        break;
-      }
-      if (i < stockCount) tft.pushImage(70, y0 + r, STOCK_NAME_W, 1, rowBuf);
-      yield();
-    }
-  }
-  http.end();
-  return ok;
-}
-
-void pollStock() {
-  if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return;
-  WiFiClient client;
-  HTTPClient http;
-  String url = "http://" + bridgeHost + "/stock";
-  http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
-  if (!http.begin(client, url)) return;
-  int code = http.GET();
-  if (code == HTTP_CODE_OK) handleStockPayload(http.getString());
-  http.end();
-}
-
-// 54px per row: small grey code on top, big font-4 price (white) on the left
-// and change% on the right - red rising / green falling (CN convention).
-// Rows repaint only when their text changes, same trick as everywhere else.
-void drawStockScreen() {
-  if (!stockChromeDrawn) {
-    tft.fillScreen(TFT_BLACK);
-    stockChromeDrawn = true;
-    for (int i = 0; i < MAX_STOCKS; i++) {
-      stockLastCode[i] = "\x01"; // force repaint
-      stockLastVal[i] = "\x01";
-    }
-    stockNamesDrawnRev = -1;
-    tft.setTextDatum(TC_DATUM);
-    tft.setTextColor(0x7BEF, TFT_BLACK);
-    tft.drawString("STOCKS", SCREEN_CX, 228, 1);
-  }
-  stockDirty = false;
-
-  if (stockCount == 0) {
-    if (stockLastCode[0] != "") {
-      for (int i = 0; i < MAX_STOCKS; i++) {
-        stockLastCode[i] = "";
-        stockLastVal[i] = "";
-      }
-      tft.fillRect(0, 0, SCREEN_W, 226, TFT_BLACK);
-      tft.setTextDatum(TC_DATUM);
-      tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-      tft.drawString(stockEverLoaded ? "No stocks configured" : "Waiting for bridge...", SCREEN_CX, 100, 2);
-      if (stockEverLoaded) tft.drawString("Mac menu: Set watchlist", SCREEN_CX, 124, 2);
-    }
-    return;
-  }
-
-  for (int i = 0; i < MAX_STOCKS; i++) {
-    int y0 = 10 + i * 54;
-    bool has = i < stockCount;
-    // top line (code + name strip) and value line refresh independently, so
-    // a price tick never wipes the name bitmap
-    String codeKey = has ? stocks[i].code : "";
-    if (codeKey != stockLastCode[i]) {
-      stockLastCode[i] = codeKey;
-      tft.fillRect(0, y0, SCREEN_W, 17, TFT_BLACK);
-      stockNamesDrawnRev = -1; // strip area wiped: re-fetch names
-      if (has) {
-        tft.setTextDatum(TL_DATUM);
-        tft.setTextColor(0x7BEF, TFT_BLACK);
-        tft.drawString(stocks[i].code, 14, y0, 2);
-      }
-    }
-    String valKey = has ? stocks[i].price + "|" + stocks[i].pct + "|" + String(stocks[i].up) : "";
-    if (valKey != stockLastVal[i]) {
-      stockLastVal[i] = valKey;
-      tft.fillRect(0, y0 + 18, SCREEN_W, 36, TFT_BLACK); // value line + inter-row gap
-      if (has) {
-        tft.setTextDatum(TL_DATUM);
-        tft.setTextColor(TFT_WHITE, TFT_BLACK);
-        tft.drawString(stocks[i].price, 14, y0 + 18, 4);
-        uint16_t pc = stocks[i].up > 0 ? TFT_RED : (stocks[i].up < 0 ? TFT_GREEN : TFT_LIGHTGREY);
-        tft.setTextDatum(TR_DATUM);
-        tft.setTextColor(pc, TFT_BLACK);
-        tft.drawString(stocks[i].pct, 226, y0 + 18, 4);
-      }
-    }
-  }
-
-  // CJK name strips, re-fetched when the watchlist (names_rev) changes
-  if (stockNamesRev >= 0 && stockNamesDrawnRev != stockNamesRev) {
-    if (drawStockNames()) stockNamesDrawnRev = stockNamesRev;
-  }
-}
-
 // ---------- WiFi / bridge polling ----------
 
 WiFiManager wifiManager; // global: the config portal now runs non-blocking in loop()
@@ -2010,7 +1846,7 @@ void drawPcScreen() {
 // bridge over LAN) - or for skipping WiFi setup entirely: when the clock is
 // plugged into the computer over USB, the bridge pushes the same /status and
 // /net payloads down the CH340 serial line as newline-terminated frames:
-//   bridge -> device:  #HELLO   #STATUS {json}   #NET {json}   #STOCK {json}
+//   bridge -> device:  #HELLO   #STATUS {json}   #NET {json}
 //                      #PC {json}   #WEATHER {json}   #TIME {"epoch":N}   #CMD {json}
 //   device -> bridge:  #DEVICE {"name":"aiclock","fw":"x.y.z"}
 // Everything else the device prints (logs) is ignored by the bridge.
@@ -2108,7 +1944,7 @@ static void holoHeader(const char *name, const String &status, bool needsInput, 
 
 void drawHoloAi() {
   tft.fillScreen(TFT_BLACK);
-  // 音樂／股票頁會改對齊方式；每次進入 Holo 都重設，避免標題被裁切。
+  // 音樂頁會改對齊方式；每次進入 Holo 都重設，避免標題被裁切。
   tft.setTextDatum(TL_DATUM);
   const uint16_t cyan = tft.color565(88, 220, 222);
   holoText("HOLO / AI MONITOR", 14, 8, cyan, 2);
@@ -2167,10 +2003,6 @@ void handleSerialFrame(char *line) {
     handleNetPayload(String(line + 5));
     return;
   }
-  if (!strncmp(line, "#STOCK ", 7)) {
-    handleStockPayload(String(line + 7));
-    return;
-  }
   if (!strncmp(line, "#TIME ", 6)) {
     JsonDocument doc;
     if (deserializeJson(doc, line + 6)) return;
@@ -2210,7 +2042,6 @@ void handleSerialFrame(char *line) {
       else if (m == "weather") displayMode = MODE_WEATHER;
       else if (m == "net") displayMode = MODE_NET;
       else if (m == "music") displayMode = MODE_MUSIC;
-      else if (m == "stock") displayMode = MODE_STOCK;
       else if (m == "holo_ai") displayMode = MODE_HOLO_AI;
       else if (m == "pc") displayMode = MODE_PC;
       // the effectiveMode transition handler in loop() repaints the chrome
@@ -2343,7 +2174,6 @@ const char *displayModeName(DisplayMode m) {
   if (m == MODE_WEATHER) return "weather";
   if (m == MODE_NET) return "net";
   if (m == MODE_MUSIC) return "music";
-  if (m == MODE_STOCK) return "stock";
   if (m == MODE_HOLO_AI) return "holo_ai";
   if (m == MODE_PC) return "pc";
   return "auto";
@@ -2390,11 +2220,10 @@ void handleApiDisplay() {
   else if (mode == "weather") displayMode = MODE_WEATHER;
   else if (mode == "net") displayMode = MODE_NET;
   else if (mode == "music") displayMode = MODE_MUSIC;
-  else if (mode == "stock") displayMode = MODE_STOCK;
   else if (mode == "holo_ai") displayMode = MODE_HOLO_AI;
   else if (mode == "pc") displayMode = MODE_PC;
   else {
-    webServer.send(400, "text/plain", "mode must be auto|claude|codex|clock|weather|net|music|stock|holo_ai|pc");
+    webServer.send(400, "text/plain", "mode must be auto|claude|codex|clock|weather|net|music|holo_ai|pc");
     return;
   }
   Serial.printf("[api] display mode = %s\n", mode.c_str());
@@ -2830,9 +2659,6 @@ void loop() {
     } else if (eff == MODE_MUSIC) {
       musicChromeDrawn = false;
       lastMusicPollMs = 0;
-    } else if (eff == MODE_STOCK) {
-      stockChromeDrawn = false;
-      lastStockPollMs = 0;
     } else {
       updateActiveApp();
       drawActiveApp();
@@ -2887,13 +2713,6 @@ void loop() {
       lastMusicPollMs = nowMs;
       pollMusic();
     }
-  } else if (eff == MODE_STOCK) {
-    // stock watchlist: HTTP poll unless the serial link is pushing #STOCK
-    if (nowMs - lastStockPollMs >= STOCK_POLL_INTERVAL_MS) {
-      lastStockPollMs = nowMs;
-      if (!wiredActive()) pollStock();
-    }
-    if (!stockChromeDrawn || stockDirty) drawStockScreen();
   } else {
     // sprite walk-cycle animation (only advances while that app is showing)
     if (nowMs - lastAnimMs >= ANIM_INTERVAL_MS) {
