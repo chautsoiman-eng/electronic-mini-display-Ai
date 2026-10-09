@@ -271,8 +271,9 @@ sealed class TrayAppContext : ApplicationContext
             : info.Effective == "music" ? "音乐"
             : info.Effective == "holo_ai" ? "Holo AI"
             : (info.Showing == "claude" ? "Claude" : "Codex");
+        var where = info.ViaUsb ? WiredText() : info.Ip;
         _deviceInfoItem.Text =
-            $"设备：{info.Ip} · 正在显示 {showing} · {string.Join(" ", sprites)}";
+            $"设备：{where} · 正在显示 {showing} · {string.Join(" ", sprites)}";
         foreach (var (mode, item) in _modeItems) item.Checked = mode == info.Mode;
         _mirrorItem.Checked = info.HorizontalMirror;
     }

@@ -114,6 +114,76 @@ Check(Cmd(SerialProtocol.Command(adminPassword: "")).GetProperty("admin_password
 Check(!Cmd(SerialProtocol.Command(display: "auto")).TryGetProperty("admin_password", out _),
     "password only sent when asked");
 
+// #IMG: music bitmaps as whole rows, each base64'd on its own, every frame
+// inside the firmware line buffer, and the rows reassemble to the original.
+var rng = new Random(7);
+foreach (var (kind, w, h) in new[] { ("cover", 128, 128), ("text", 232, 44) })
+{
+    var img = new byte[w * h * 2];
+    rng.NextBytes(img);
+    var imgFrames = SerialProtocol.ImageFrames(kind, 5, img, w);
+    Check(imgFrames.Count > 0, kind + " frames produced");
+    var rebuilt = new byte[img.Length];
+    int nextRow = 0;
+    foreach (var f in imgFrames)
+    {
+        Check(f.Length <= SerialProtocol.MaxFrameBytes && f[^1] == (byte)'\n', kind + " frame fits");
+        var line = Text(f).TrimEnd('\n');
+        Check(line.StartsWith("#IMG "), kind + " frame tag");
+        using var doc = JsonDocument.Parse(line[5..]);
+        var root = doc.RootElement;
+        Check(root.GetProperty("k").GetString() == kind && root.GetProperty("rev").GetInt32() == 5, kind + " header");
+        int row = root.GetProperty("row").GetInt32();
+        Check(row == nextRow, kind + " rows in order");
+        foreach (var part in root.GetProperty("d").GetString().Split(','))
+        {
+            var bytes = Convert.FromBase64String(part);
+            Check(bytes.Length == w * 2 && bytes.Length <= 480, kind + " one row per part, fits rowBuf");
+            bytes.CopyTo(rebuilt, nextRow * w * 2);
+            nextRow++;
+        }
+    }
+    Check(nextRow == h && rebuilt.SequenceEqual(img), kind + " reassembles exactly");
+    Check(imgFrames.Count <= (kind == "cover" ? 43 : 22), $"{kind} uses few frames ({imgFrames.Count})");
+}
+Check(SerialProtocol.ImageFrames("cover", 1, Array.Empty<byte>(), 128).Count == 0, "no artwork, no frames");
+Check(SerialProtocol.ImageFrames("cover", 1, new byte[100], 128).Count == 0, "partial row rejected");
+
+// #NEED / #INFO from the clock.
+Check(SerialProtocol.TryParseNeed("#NEED {\"k\":\"cover\",\"rev\":3}", out var needKind, out var needRev)
+    && needKind == "cover" && needRev == 3, "need cover parsed");
+Check(SerialProtocol.TryParseNeed("#NEED {\"k\":\"text\",\"rev\":-1}", out needKind, out _) && needKind == "text",
+    "need text parsed");
+Check(!SerialProtocol.TryParseNeed("#NEED {\"k\":\"secrets\"}", out _, out _), "unknown bitmap rejected");
+Check(!SerialProtocol.TryParseNeed("#NEED {broken", out _, out _), "malformed need ignored");
+Check(SerialProtocol.InfoJson("#INFO {\"mode\":\"auto\",\"sprite_rev\":2}") == "{\"mode\":\"auto\",\"sprite_rev\":2}",
+    "info json passed through");
+Check(SerialProtocol.InfoJson("#INFO {cut off") == null, "truncated info ignored");
+Check(SerialProtocol.InfoJson("[web] #INFO") == null, "log line is not info");
+Check(Cmd(SerialProtocol.Command(spriteDump: "codex")).GetProperty("sprite_dump").GetString() == "codex",
+    "sprite dump command");
+
+// #SPR: sprite streamed by the clock in 384-byte chunks, as pumpSpriteDump sends them.
+var sprite = new byte[1 + 6 * 111 * 120 * 2];
+rng.NextBytes(sprite);
+sprite[0] = 6;
+string SprLine(string slot, int off, int len) =>
+    $"#SPR {{\"slot\":\"{slot}\",\"rev\":4,\"total\":{sprite.Length},\"off\":{off},\"d\":\"{Convert.ToBase64String(sprite, off, len)}\"}}";
+var asm = new SpriteAssembler("claude");
+byte[] got = null;
+for (int off = 0; off < sprite.Length; off += 384)
+{
+    Check(got == null, "not done before last chunk");
+    Check(asm.Accept(SprLine("codex", off, Math.Min(384, sprite.Length - off))) == null, "other slot ignored");
+    got = asm.Accept(SprLine("claude", off, Math.Min(384, sprite.Length - off)));
+}
+Check(got != null && got.SequenceEqual(sprite), "sprite reassembled exactly");
+var gap = new SpriteAssembler("claude");
+Check(gap.Accept(SprLine("claude", 0, 384)) == null, "first chunk accepted");
+Check(gap.Accept(SprLine("claude", 768, 384)) == null, "gap detected");
+Check(gap.Accept(SprLine("claude", 384, 384)) == null, "transfer restarts after a gap");
+Check(gap.Accept("#SPR {not json") == null, "malformed chunk ignored");
+
 // Bridge HTTP: hook events only from this PC and never from a browser page.
 Check(MiniHttpServer.PostAllowed("127.0.0.1", new[] { "POST /event HTTP/1.1" }), "loopback curl allowed");
 Check(MiniHttpServer.PostAllowed("::1", new[] { "POST /event HTTP/1.1" }), "IPv6 loopback allowed");
@@ -144,4 +214,4 @@ using (var server = new MiniHttpServer(0, new() { ["/status"] = () => Bytes("{}"
     Check(!statusResp.Headers.Contains("Access-Control-Allow-Origin"), "no CORS for web pages");
 }
 
-Console.WriteLine($"PASS: {checks} serial protocol and bridge security assertions");
+Console.WriteLine($"PASS: {checks} serial protocol, wired music/sprite and bridge security assertions");

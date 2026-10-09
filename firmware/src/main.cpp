@@ -168,6 +168,63 @@ bool musicHasArtwork = false;
 bool musicChromeDrawn = false;
 int musicSpectrum[24] = {0};
 unsigned long lastMusicPollMs = 0;
+// Wired-only music: #MUSIC frames replace HTTP /music, and the cover/text
+// bitmaps arrive as #IMG row chunks after the clock asks with #NEED.
+unsigned long musicSerialMs = 0;
+bool musicSerialSeen = false;
+// #CMD sprite_dump state (see pumpSpriteDump)
+int spriteDumpSlot = -1; // APP_CLAUDE / APP_CODEX while a dump is running
+size_t spriteDumpOffset = 0;
+
+bool wiredActive();
+DisplayMode effectiveMode();
+
+// Minimal base64 (no line breaks) for #IMG / #SPR payloads.
+static int b64Value(char c) {
+  if (c >= 'A' && c <= 'Z') return c - 'A';
+  if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+  if (c >= '0' && c <= '9') return c - '0' + 52;
+  if (c == '+') return 62;
+  if (c == '/') return 63;
+  return -1;
+}
+
+// Decodes up to the end of string or a ',' separator into out (capacity
+// outCap); returns bytes written or -1 on bad input. *end gets the stop point.
+int b64Decode(const char *in, uint8_t *out, int outCap, const char **end = nullptr) {
+  int n = 0, bits = 0, acc = 0;
+  for (; *in && *in != ','; in++) {
+    if (*in == '=') continue;
+    int v = b64Value(*in);
+    if (v < 0) return -1;
+    acc = ((acc << 6) | v) & 0xFFFFFF; // only the low bits are ever read
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      if (n >= outCap) return -1;
+      out[n++] = (uint8_t)((acc >> bits) & 0xFF);
+    }
+  }
+  if (end) *end = in;
+  return n;
+}
+
+// Encodes len bytes into out (needs 4*ceil(len/3)+1); returns chars written.
+int b64Encode(const uint8_t *in, int len, char *out) {
+  static const char *tbl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  int o = 0;
+  for (int i = 0; i < len; i += 3) {
+    uint32_t v = (uint32_t)in[i] << 16;
+    if (i + 1 < len) v |= (uint32_t)in[i + 1] << 8;
+    if (i + 2 < len) v |= in[i + 2];
+    out[o++] = tbl[(v >> 18) & 63];
+    out[o++] = tbl[(v >> 12) & 63];
+    out[o++] = i + 1 < len ? tbl[(v >> 6) & 63] : '=';
+    out[o++] = i + 2 < len ? tbl[v & 63] : '=';
+  }
+  out[o] = 0;
+  return o;
+}
 
 int claudeFrame = 0;
 int codexFrame = 0;
@@ -1326,10 +1383,18 @@ void drawMusicScreen(bool coverChanged, bool textChanged) {
     musicChromeDrawn = true;
   }
   if (coverChanged) {
-    if (!drawMusicCoverFromBridge()) drawMusicCoverPlaceholder();
+    if (!drawMusicCoverFromBridge()) {
+      drawMusicCoverPlaceholder();
+      // wired-only: the bridge streams the cover as #IMG rows over the placeholder
+      if (wiredActive() && musicHasArtwork)
+        Serial.printf("#NEED {\"k\":\"cover\",\"rev\":%d}\n", musicArtworkRev);
+    }
   }
   if (textChanged) {
-    if (!drawMusicTextFromBridge()) drawMusicTextFallback();
+    if (!drawMusicTextFromBridge()) {
+      drawMusicTextFallback();
+      if (wiredActive()) Serial.printf("#NEED {\"k\":\"text\",\"rev\":%d}\n", musicTextRev);
+    }
   }
 
   const int spectrumY = 198;
@@ -1351,6 +1416,32 @@ void drawMusicScreen(bool coverChanged, bool textChanged) {
   tft.fillRect(bx, by, (int)(bw * progress), bh, color);
 }
 
+// Shared by HTTP /music and the serial #MUSIC frame. Only repaints while the
+// music page is on screen; otherwise it just keeps the state fresh.
+bool handleMusicPayload(const String &payload, bool draw) {
+  JsonDocument doc;
+  if (deserializeJson(doc, payload)) return false;
+  musicTitle = doc["title"] | "";
+  musicArtist = doc["artist"] | "";
+  musicAlbum = doc["album"] | "";
+  musicPlaying = doc["playing"] | false;
+  statusMusicPlaying = musicPlaying; // fast stop-detection while music shows
+  musicElapsed = doc["elapsed"] | 0;
+  musicDuration = doc["duration"] | 0;
+  musicHasArtwork = doc["has_artwork"] | false;
+  int rev = doc["artwork_rev"] | -1;
+  bool coverChanged = rev != musicArtworkRev;
+  musicArtworkRev = rev;
+  int tRev = doc["text_rev"] | -1;
+  bool textChanged = tRev != musicTextRev;
+  musicTextRev = tRev;
+  JsonArray spectrum = doc["spectrum"];
+  for (int i = 0; i < 24; i++)
+    musicSpectrum[i] = i < (int)spectrum.size() ? constrain(spectrum[i].as<int>(), 0, 100) : 0;
+  if (draw) drawMusicScreen(coverChanged, textChanged);
+  return true;
+}
+
 void pollMusic() {
   if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return;
   WiFiClient client;
@@ -1359,30 +1450,40 @@ void pollMusic() {
   http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
   if (!http.begin(client, url)) return;
   int code = http.GET();
-  if (code == HTTP_CODE_OK) {
-    JsonDocument doc;
-    if (!deserializeJson(doc, http.getString())) {
-      musicTitle = doc["title"] | "";
-      musicArtist = doc["artist"] | "";
-      musicAlbum = doc["album"] | "";
-      musicPlaying = doc["playing"] | false;
-      statusMusicPlaying = musicPlaying; // fast stop-detection while music shows
-      musicElapsed = doc["elapsed"] | 0;
-      musicDuration = doc["duration"] | 0;
-      musicHasArtwork = doc["has_artwork"] | false;
-      int rev = doc["artwork_rev"] | -1;
-      bool coverChanged = rev != musicArtworkRev;
-      musicArtworkRev = rev;
-      int tRev = doc["text_rev"] | -1;
-      bool textChanged = tRev != musicTextRev;
-      musicTextRev = tRev;
-      JsonArray spectrum = doc["spectrum"];
-      for (int i = 0; i < 24; i++)
-        musicSpectrum[i] = i < (int)spectrum.size() ? constrain(spectrum[i].as<int>(), 0, 100) : 0;
-      drawMusicScreen(coverChanged, textChanged);
-    }
+  String body = code == HTTP_CODE_OK ? http.getString() : String();
+  http.end(); // free the socket before drawMusicScreen opens cover/text requests
+  if (body.length()) handleMusicPayload(body, true);
+}
+
+// #IMG {"k":"cover"|"text","rev":N,"row":r,"d":"<b64 row>,<b64 row>..."}: whole
+// RGB565 rows (pushImage byte order), each base64-encoded on its own so it
+// decodes straight into rowBuf - no extra buffer. Rows for a stale rev or
+// another page are dropped.
+void handleImageFrame(const char *json) {
+  JsonDocument doc;
+  if (deserializeJson(doc, json)) return;
+  if (effectiveMode() != MODE_MUSIC || !musicChromeDrawn) return;
+  String kind = doc["k"] | "";
+  int rev = doc["rev"] | -2;
+  int row = doc["row"] | -1;
+  const char *data = doc["d"] | "";
+  bool cover = kind == "cover";
+  if (!cover && kind != "text") return;
+  if (rev != (cover ? musicArtworkRev : musicTextRev)) return;
+  int w = cover ? MUSIC_COVER_W : MUSIC_TEXT_W;
+  int h = cover ? MUSIC_COVER_H : MUSIC_TEXT_H;
+  int x = cover ? (SCREEN_W - MUSIC_COVER_W) / 2 : MUSIC_TEXT_X;
+  int y = cover ? 14 : MUSIC_TEXT_Y;
+  int rowBytes = w * 2; // largest row (text) is 464 bytes, rowBuf holds 480
+  if (row < 0) return;
+  const char *p = data;
+  for (int r = row; *p && r < h; r++) {
+    const char *end = p;
+    int n = b64Decode(p, (uint8_t *)rowBuf, sizeof(rowBuf), &end);
+    if (n != rowBytes) return;
+    tft.pushImage(x, y + r, w, 1, rowBuf);
+    p = *end == ',' ? end + 1 : end;
   }
-  http.end();
 }
 
 // ---------- WiFi / bridge polling ----------
@@ -1464,9 +1565,8 @@ bool parseStatusJson(const String &payload) {
 DisplayMode effectiveMode() {
   if (displayMode == MODE_AUTO) {
     if (claudeStatus.needsInput || codexStatus.needsInput) return MODE_AUTO;
-    // music page needs HTTP for cover/text bitmaps, so don't auto-promote
-    // when running wired-only (no WiFi)
-    if (statusMusicPlaying && WiFi.status() == WL_CONNECTED) return MODE_MUSIC;
+    // cover/text bitmaps come over HTTP, or as #IMG rows on a USB link
+    if (statusMusicPlaying && (WiFi.status() == WL_CONNECTED || wiredActive())) return MODE_MUSIC;
   }
   return displayMode;
 }
@@ -1875,7 +1975,9 @@ void drawPcScreen() {
 // /net payloads down the CH340 serial line as newline-terminated frames:
 //   bridge -> device:  #HELLO   #STATUS {json}   #NET {json}
 //                      #PC {json}   #WEATHER {json}   #TIME {"epoch":N}   #CMD {json}
-//   device -> bridge:  #DEVICE {"name":"aiclock","fw":"x.y.z"}
+//                      #MUSIC {json}   #IMG {"k","rev","row","d"}
+//   device -> bridge:  #DEVICE {"name":"aiclock","fw":"x.y.z"}   #INFO {json}
+//                      #NEED {"k","rev"}   #SPR {"slot","rev","total","off","d"}
 // Everything else the device prints (logs) is ignored by the bridge.
 unsigned long lastSerialFrameMs = 0;
 bool wiredEverLinked = false;
@@ -2043,6 +2145,17 @@ void handleSerialFrame(char *line) {
     }
     return;
   }
+  if (!strncmp(line, "#MUSIC ", 7)) {
+    if (handleMusicPayload(String(line + 7), effectiveMode() == MODE_MUSIC)) {
+      musicSerialSeen = true;
+      musicSerialMs = millis();
+    }
+    return;
+  }
+  if (!strncmp(line, "#IMG ", 5)) {
+    handleImageFrame(line + 5);
+    return;
+  }
   if (!strncmp(line, "#PC ", 4)) {
     if (handlePcPayload(String(line + 4))) {
       pcSerialSeen = true;
@@ -2072,6 +2185,14 @@ void handleSerialFrame(char *line) {
       else if (m == "holo_ai") displayMode = MODE_HOLO_AI;
       else if (m == "pc") displayMode = MODE_PC;
       // the effectiveMode transition handler in loop() repaints the chrome
+    }
+    const char *dump = doc["sprite_dump"] | (const char *)nullptr;
+    if (dump) {
+      String slot(dump);
+      if (slot == "claude" || slot == "codex") {
+        spriteDumpSlot = slot == "claude" ? APP_CLAUDE : APP_CODEX;
+        spriteDumpOffset = 0;
+      }
     }
     // USB = physical access: allowed to set or clear the web admin password
     if (doc["admin_password"].is<const char *>()) saveAdminPassword(doc["admin_password"].as<const char *>());
@@ -2230,7 +2351,7 @@ const char *displayModeName(DisplayMode m) {
   return "auto";
 }
 
-void handleApiInfo() {
+void buildInfoJson(String &out) {
   JsonDocument doc;
   doc["ip"] = WiFi.localIP().toString();
   doc["ssid"] = WiFi.SSID();
@@ -2257,9 +2378,70 @@ void handleApiInfo() {
   x["custom_sprite"] = codexCustom;
   x["w"] = CODEX_SPRITE_W;
   x["h"] = CODEX_SPRITE_H;
-  String out;
   serializeJson(doc, out);
+}
+
+void handleApiInfo() {
+  String out;
+  buildInfoJson(out);
   webServer.send(200, "application/json", out);
+}
+
+// ---------- wired-only extras: #INFO heartbeat and #SPR sprite dump ----------
+// Without WiFi the bridge cannot GET /api/info or /sprite/*/raw, so the clock
+// pushes its info every 2s and streams a sprite on request (#CMD sprite_dump)
+// as base64 chunks, one per loop pass so animation and serial RX keep going.
+unsigned long lastInfoPushMs = 0;
+unsigned long lastSpriteChunkMs = 0;
+const size_t SPRITE_CHUNK_BYTES = 384; // -> 512 base64 chars per #SPR line
+
+void pushInfoIfWired(unsigned long nowMs) {
+  if (!wiredActive() || nowMs - lastInfoPushMs < 2000UL) return;
+  lastInfoPushMs = nowMs;
+  String out;
+  buildInfoJson(out);
+  Serial.print("#INFO ");
+  Serial.println(out);
+}
+
+void pumpSpriteDump(unsigned long nowMs) {
+  if (spriteDumpSlot < 0 || nowMs - lastSpriteChunkMs < 60UL) return;
+  lastSpriteChunkMs = nowMs;
+  bool claude = spriteDumpSlot == APP_CLAUDE;
+  bool custom = claude ? claudeCustom : codexCustom;
+  int frames = claude ? claudeFrameCount() : codexFrameCount();
+  size_t frameBytes = claude ? CLAUDE_FRAME_BYTES : CODEX_FRAME_BYTES;
+  size_t total = 1 + (size_t)frames * frameBytes; // same layout as /sprite/*/raw
+  uint8_t raw[SPRITE_CHUNK_BYTES];                // on the stack only while sending
+  char enc[SPRITE_CHUNK_BYTES / 3 * 4 + 8];
+  size_t n = min(SPRITE_CHUNK_BYTES, total - spriteDumpOffset);
+  if (custom) {
+    File f = LittleFS.open(claude ? CLAUDE_SPRITE_FILE : CODEX_SPRITE_FILE, "r");
+    if (!f) {
+      spriteDumpSlot = -1;
+      return;
+    }
+    f.seek(spriteDumpOffset);
+    n = f.read(raw, n);
+    f.close();
+  } else {
+    const uint16_t *const *arr = claude ? claude_sprite_frames : codex_sprite_frames;
+    for (size_t i = 0; i < n; i++) {
+      size_t off = spriteDumpOffset + i;
+      if (off == 0) {
+        raw[i] = (uint8_t)frames;
+        continue;
+      }
+      size_t inFrame = off - 1;
+      const uint8_t *frame = (const uint8_t *)arr[inFrame / frameBytes];
+      raw[i] = pgm_read_byte(frame + inFrame % frameBytes);
+    }
+  }
+  b64Encode(raw, (int)n, enc);
+  Serial.printf("#SPR {\"slot\":\"%s\",\"rev\":%u,\"total\":%u,\"off\":%u,\"d\":\"%s\"}\n",
+                claude ? "claude" : "codex", spriteRev, (unsigned)total, (unsigned)spriteDumpOffset, enc);
+  spriteDumpOffset += n;
+  if (n == 0 || spriteDumpOffset >= total) spriteDumpSlot = -1;
 }
 
 void handleApiDisplay() {
@@ -2699,6 +2881,8 @@ void setup() {
 void loop() {
   wifiManager.process(); // keeps the config portal alive until WiFi is set up
   pumpSerial();          // wired (USB) bridge frames
+  pushInfoIfWired(millis());
+  pumpSpriteDump(millis());
 
   if (!webServerStarted && WiFi.status() == WL_CONNECTED) {
     // WiFi came up after boot (portal or slow AP); the portal has released
@@ -2792,7 +2976,8 @@ void loop() {
     // music now-playing mode: cover art + track metadata from the bridge
     if (nowMs - lastMusicPollMs >= MUSIC_POLL_INTERVAL_MS) {
       lastMusicPollMs = nowMs;
-      pollMusic();
+      // #MUSIC frames (1s) drive the page while the USB bridge is pushing them
+      if (!musicSerialSeen || nowMs - musicSerialMs > 5000UL) pollMusic();
     }
   } else {
     // sprite walk-cycle animation (only advances while that app is showing)

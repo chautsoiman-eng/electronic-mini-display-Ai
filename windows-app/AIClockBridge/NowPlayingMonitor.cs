@@ -76,7 +76,21 @@ sealed class NowPlayingMonitor
             TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2));
     }
 
-    public byte[] ToJson(int[] spectrum = null)
+    /// Bitmap the clock asked for over USB (#NEED), with its rev, read under
+    /// one lock so rev and pixels always match.
+    public (int Rev, byte[] Data, int Width) SerialImage(string kind)
+    {
+        if (kind == "text") RenderTextIfNeeded();
+        lock (_lock)
+            return kind == "cover"
+                ? (CurrentLocked().ArtworkRev, _coverRgb565, CoverW)
+                : (_textRev, _textRgb565, TextW);
+    }
+
+    /// maxText trims title/artist/album for the USB #MUSIC frame: the clock
+    /// only uses them for its ASCII fallback (the text strip is a bitmap), and
+    /// escaped CJK must not push the frame past the firmware's line buffer.
+    public byte[] ToJson(int[] spectrum = null, int maxText = int.MaxValue)
     {
         RenderTextIfNeeded();
         var s = Snapshot;
@@ -89,9 +103,9 @@ sealed class NowPlayingMonitor
         }
         return JsonSerializer.SerializeToUtf8Bytes(new Dictionary<string, object>
         {
-            ["title"] = s.Title,
-            ["artist"] = s.Artist,
-            ["album"] = s.Album,
+            ["title"] = Trim(s.Title, maxText),
+            ["artist"] = Trim(s.Artist, maxText),
+            ["album"] = Trim(s.Album, maxText),
             ["playing"] = s.Playing,
             ["elapsed"] = (int)Math.Round(s.Elapsed),
             ["duration"] = (int)Math.Round(s.Duration),
@@ -102,6 +116,8 @@ sealed class NowPlayingMonitor
             ["spectrum"] = spectrum ?? new int[SpectrumAnalyzer.BarCount],
         });
     }
+
+    static string Trim(string s, int max) => s == null || s.Length <= max ? s : s[..max];
 
     /// Re-renders the title/artist strip when the strings change. Called on
     /// the /music request path (cheap no-op when nothing changed).

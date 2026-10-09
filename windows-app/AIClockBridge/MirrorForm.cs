@@ -576,7 +576,9 @@ sealed class MirrorForm : Form
             : info.Mode == "clock" ? "时钟"
             : info.Mode == "weather" ? "天气"
             : info.Mode == "music" ? "音乐播放" : "固定显示";
-        _statusLabel.Text = $"{info.Ip} · {modeText} · 数据 {info.Bridge}";
+        _statusLabel.Text = info.ViaUsb
+            ? $"USB 有线 {SerialLink.Current?.PortName} · {modeText}"
+            : $"{info.Ip} · {modeText} · 数据 {info.Bridge}";
     }
 
     /// Quota lines & ring exactly as the firmware computes them from /status.

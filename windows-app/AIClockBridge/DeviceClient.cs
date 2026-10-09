@@ -26,6 +26,7 @@ class DeviceInfo
     public bool CodexCustomSprite;
     public int ClaudeW = 111, ClaudeH = 120;
     public int CodexW = 120, CodexH = 120;
+    public bool ViaUsb;                // came from the clock's #INFO heartbeat, not HTTP
 }
 
 class DeviceException : Exception
@@ -100,20 +101,33 @@ static class DeviceClient
         return new Uri(b, path);
     }
 
-    /// GET /api/info
+    /// GET /api/info — or, when HTTP can't reach the clock (no address, no
+    /// WiFi, AP isolation), the same JSON from its USB #INFO heartbeat.
     public static async Task<DeviceInfo> FetchInfo()
     {
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         string body;
         try
         {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             body = await Http.GetStringAsync(Resolve("api/info"), cts.Token);
         }
-        catch (DeviceException) { throw; }
         catch (Exception e)
         {
+            var wired = SerialLink.Current?.LatestInfoJson;
+            if (wired != null)
+            {
+                var info = ParseInfo(wired);
+                info.ViaUsb = true;
+                return info;
+            }
+            if (e is DeviceException) throw;
             throw new DeviceException($"无法连接设备：{e.Message}");
         }
+        return ParseInfo(body);
+    }
+
+    static DeviceInfo ParseInfo(string body)
+    {
         try
         {
             using var doc = JsonDocument.Parse(body);
@@ -209,16 +223,20 @@ static class DeviceClient
     /// using, wire format [1 byte frame count][RGB565 big-endian frames...].
     public static async Task<byte[]> FetchSpriteRaw(string slot)
     {
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         byte[] data;
         try
         {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
             data = await Http.GetByteArrayAsync(Resolve($"sprite/{slot}/raw"), cts.Token);
         }
-        catch (DeviceException) { throw; }
         catch (Exception e)
         {
-            throw new DeviceException($"拉取动画失败：{e.Message}");
+            // no WiFi path: the clock streams the sprite over USB instead
+            var link = SerialLink.Current;
+            data = link is { IsLinked: true }
+                ? await link.RequestSpriteAsync(slot, TimeSpan.FromSeconds(60)) : null;
+            if (data == null)
+                throw e as DeviceException ?? new DeviceException($"拉取动画失败：{e.Message}");
         }
         if (data.Length <= 1) throw new DeviceException("设备响应解析失败");
         return data;

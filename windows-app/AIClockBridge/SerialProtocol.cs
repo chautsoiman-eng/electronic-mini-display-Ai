@@ -7,7 +7,9 @@ namespace AIClockBridge;
 // firmware handleSerialFrame): newline-terminated ASCII frames.
 //   bridge -> device:  #HELLO  #STATUS {json}  #NET {json}
 //                      #PC {json}  #WEATHER {json}  #TIME {"epoch":N}  #CMD {json}
-//   device -> bridge:  #DEVICE {"name":"aiclock","fw":"x.y.z"}
+//                      #MUSIC {json}  #IMG {"k","rev","row","d"}
+//   device -> bridge:  #DEVICE {"name":"aiclock","fw":"x.y.z"}  #INFO {json}
+//                      #NEED {"k","rev"}  #SPR {"slot","rev","total","off","d"}
 // Kept free of System.IO.Ports so the framing can be tested without hardware.
 static class SerialProtocol
 {
@@ -38,14 +40,85 @@ static class SerialProtocol
     /// #CMD carrying any subset of display mode / brightness / mirror /
     /// web admin password (USB = physical access, so no current password).
     public static byte[] Command(string display = null, int? brightness = null, bool? mirror = null,
-                                 string adminPassword = null)
+                                 string adminPassword = null, string spriteDump = null)
     {
         var cmd = new Dictionary<string, object>();
+        if (spriteDump != null) cmd["sprite_dump"] = spriteDump;
         if (adminPassword != null) cmd["admin_password"] = adminPassword;
         if (display != null) cmd["display"] = display;
         if (brightness is int level) cmd["brightness"] = Math.Clamp(level, 0, 100);
         if (mirror is bool m) cmd["mirror"] = m;
         return Frame("CMD", JsonSerializer.SerializeToUtf8Bytes(cmd));
+    }
+
+    /// Music-page bitmap (cover 128x128 or text strip 232x44, RGB565 in the
+    /// device's pushImage byte order) as #IMG frames. Each row is base64'd on
+    /// its own and rows are comma-joined, so the firmware decodes a row
+    /// straight into its 480-byte row buffer; as many rows per frame as fit.
+    public static List<byte[]> ImageFrames(string kind, int rev, byte[] rgb565, int width)
+    {
+        var frames = new List<byte[]>();
+        int rowBytes = width * 2;
+        if (rgb565 == null || rowBytes == 0 || rgb565.Length % rowBytes != 0) return frames;
+        int rows = rgb565.Length / rowBytes;
+        int row = 0;
+        while (row < rows)
+        {
+            byte[] best = null;
+            int take = 0;
+            for (int n = 1; row + n <= rows; n++)
+            {
+                var parts = Enumerable.Range(row, n)
+                    .Select(r => Convert.ToBase64String(rgb565, r * rowBytes, rowBytes));
+                var json = $"{{\"k\":\"{kind}\",\"rev\":{rev},\"row\":{row},\"d\":\"{string.Join(",", parts)}\"}}";
+                var frame = Frame("IMG", Encoding.ASCII.GetBytes(json));
+                if (frame == null) break;
+                best = frame;
+                take = n;
+            }
+            if (best == null) return new List<byte[]>(); // a single row cannot fit
+            frames.Add(best);
+            row += take;
+        }
+        return frames;
+    }
+
+    /// #NEED {"k":"cover"|"text","rev":N} — the clock asks for a music bitmap.
+    public static bool TryParseNeed(string line, out string kind, out int rev)
+    {
+        kind = null;
+        rev = -1;
+        if (!line.StartsWith("#NEED ", StringComparison.Ordinal)) return false;
+        try
+        {
+            using var doc = JsonDocument.Parse(line[6..]);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("k", out var k) || k.ValueKind != JsonValueKind.String) return false;
+            kind = k.GetString();
+            if (kind != "cover" && kind != "text") return false;
+            rev = root.TryGetProperty("rev", out var r) && r.ValueKind == JsonValueKind.Number ? r.GetInt32() : -1;
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    /// #INFO {json} — the same JSON as GET /api/info, pushed every 2s on USB.
+    public static string InfoJson(string line)
+    {
+        if (!line.StartsWith("#INFO ", StringComparison.Ordinal)) return null;
+        var json = line[6..];
+        try
+        {
+            using var _ = JsonDocument.Parse(json);
+            return json;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     public static bool IsDeviceReply(string line) => line.StartsWith("#DEVICE", StringComparison.Ordinal);
@@ -161,5 +234,53 @@ sealed class SerialFrameScheduler
             frame = null;
         }
         return (pick.Tag, frame);
+    }
+}
+
+/// Reassembles a sprite the clock streams as #SPR chunks (after #CMD
+/// sprite_dump) into the /sprite/*/raw layout [1 byte frames][RGB565...].
+/// Chunks must arrive in order; anything else restarts the transfer.
+sealed class SpriteAssembler
+{
+    readonly string _slot;
+    byte[] _buf;
+    int _received;
+
+    public SpriteAssembler(string slot) => _slot = slot;
+
+    /// Feeds one line; returns the finished sprite when the last chunk lands.
+    public byte[] Accept(string line)
+    {
+        if (!line.StartsWith("#SPR ", StringComparison.Ordinal)) return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(line[5..]);
+            var root = doc.RootElement;
+            if (root.GetProperty("slot").GetString() != _slot) return null;
+            int total = root.GetProperty("total").GetInt32();
+            int off = root.GetProperty("off").GetInt32();
+            var data = Convert.FromBase64String(root.GetProperty("d").GetString() ?? "");
+            if (total <= 1 || total > 1_000_000) return null;
+            if (off == 0)
+            {
+                _buf = new byte[total];
+                _received = 0;
+            }
+            if (_buf == null || _buf.Length != total || off != _received || off + data.Length > total)
+            {
+                _buf = null; // out of order: wait for a fresh dump
+                return null;
+            }
+            data.CopyTo(_buf, off);
+            _received += data.Length;
+            if (_received < total) return null;
+            var done = _buf;
+            _buf = null;
+            return done;
+        }
+        catch (Exception e) when (e is JsonException or FormatException or KeyNotFoundException or InvalidOperationException)
+        {
+            return null;
+        }
     }
 }

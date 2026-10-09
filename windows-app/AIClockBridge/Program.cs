@@ -136,7 +136,8 @@ static class Program
         feeds.Add("PC", TimeSpan.FromSeconds(1), () => SerialProtocol.Frame("PC", pcMonitor.Snapshot().ToJson()));
         feeds.Add("WEATHER", TimeSpan.FromMinutes(1), () => SerialProtocol.Frame("WEATHER", weather.ToJson()));
         feeds.Add("TIME", TimeSpan.FromMinutes(1), () => SerialProtocol.Time(DateTimeOffset.UtcNow));
-        using var serialLink = new SerialLink(feeds);
+        feeds.Add("MUSIC", TimeSpan.FromSeconds(1), () => SerialProtocol.Frame("MUSIC", nowPlaying.ToJson(spectrum.Levels, maxText: 32)));
+        using var serialLink = new SerialLink(feeds) { ImageSource = nowPlaying.SerialImage };
         serialLink.Start();
 
         var context = new TrayAppContext(service, usage, netMonitor, nowPlaying, spectrum,
