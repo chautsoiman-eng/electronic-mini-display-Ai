@@ -27,4 +27,4 @@ GitHub Actions 的 `Holo build and render checks` 會建置韌體、Windows app 
 4. 從音樂、網速、股票切入 Holo，再切回各模式；確認 Holo 標題左對齊、AUTO 音樂播放／停止與審批優先切換正常。在 Holo 上傳／重設寵物圖片，不應覆蓋 Holo。
 5. 拔除裝置後 Windows 鏡像顯示 DEVICE OFFLINE；重接後恢復。另需在實機觀察長時間刷新、WiFi 配網與 LittleFS 圖片保存。
 
-PC 監控與時鐘已完成；獨立天氣頁、音訊 FFT 與水平鏡像仍是 roadmap 待辦。
+PC 監控、時鐘、天氣頁、音訊 FFT 與水平鏡像均已完成（見 `docs/HANDOFF_2026-10-09.md`）；仍待實機驗證。

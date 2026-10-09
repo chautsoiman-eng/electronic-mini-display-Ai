@@ -16,6 +16,7 @@
 #include <TFT_eSPI.h>
 #include <AnimatedGIF.h>
 #include <time.h>
+#include <sys/time.h>
 
 #include "config.h"
 #include "img/claude_sprite.h"
@@ -118,6 +119,9 @@ ClockWeather clockWeather;
 bool weatherDirty = true;
 unsigned long lastWeatherPollMs = 0;
 const unsigned long WEATHER_POLL_INTERVAL_MS = 10UL * 60UL * 1000UL;
+// Wired bridges push #WEATHER; while those are fresh, HTTP /weather polling is skipped.
+unsigned long weatherSerialMs = 0;
+bool weatherSerialSeen = false;
 
 // ---------- net speed mode state ----------
 // Rendering is decoupled from the network: pollNet() fetches every 2s and
@@ -1659,6 +1663,19 @@ void startClockSync() {
   Serial.printf("[clock] SNTP started, timezone=%s\n", CLOCK_TIMEZONE);
 }
 
+// Wired-only clocks never reach NTP, so the USB bridge sends #TIME {"epoch":N}.
+// SNTP stays authoritative: serial time is applied only while SNTP is not
+// running or has not produced a valid time yet.
+bool applySerialTime(uint32_t epoch) {
+  if (epoch < 1609459200UL) return false;
+  if (clockSyncStarted && time(nullptr) >= 1609459200) return false;
+  setenv("TZ", CLOCK_TIMEZONE, 1);
+  tzset();
+  struct timeval tv = {(time_t)epoch, 0};
+  settimeofday(&tv, nullptr);
+  return true;
+}
+
 bool clockLocalTime(struct tm &local) {
   time_t now = time(nullptr);
   // 2021-01-01: a boot-relative or zero epoch must never appear as real time.
@@ -1754,6 +1771,7 @@ bool handleWeatherPayload(const String &payload) {
 }
 
 void pollWeather() {
+  if (weatherSerialSeen && millis() - weatherSerialMs < 2UL * WEATHER_POLL_INTERVAL_MS) return;
   if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return;
   WiFiClient client;
   HTTPClient http;
@@ -1992,7 +2010,8 @@ void drawPcScreen() {
 // bridge over LAN) - or for skipping WiFi setup entirely: when the clock is
 // plugged into the computer over USB, the bridge pushes the same /status and
 // /net payloads down the CH340 serial line as newline-terminated frames:
-//   bridge -> device:  #HELLO   #STATUS {json}   #NET {json}   #CMD {json}
+//   bridge -> device:  #HELLO   #STATUS {json}   #NET {json}   #STOCK {json}
+//                      #PC {json}   #WEATHER {json}   #TIME {"epoch":N}   #CMD {json}
 //   device -> bridge:  #DEVICE {"name":"aiclock","fw":"x.y.z"}
 // Everything else the device prints (logs) is ignored by the bridge.
 unsigned long lastSerialFrameMs = 0;
@@ -2103,6 +2122,19 @@ void handleSerialFrame(char *line) {
   }
   if (!strncmp(line, "#STOCK ", 7)) {
     handleStockPayload(String(line + 7));
+    return;
+  }
+  if (!strncmp(line, "#TIME ", 6)) {
+    JsonDocument doc;
+    if (deserializeJson(doc, line + 6)) return;
+    if (doc["epoch"].is<uint32_t>()) applySerialTime(doc["epoch"].as<uint32_t>());
+    return;
+  }
+  if (!strncmp(line, "#WEATHER ", 9)) {
+    if (handleWeatherPayload(String(line + 9))) {
+      weatherSerialSeen = true;
+      weatherSerialMs = millis();
+    }
     return;
   }
   if (!strncmp(line, "#PC ", 4)) {

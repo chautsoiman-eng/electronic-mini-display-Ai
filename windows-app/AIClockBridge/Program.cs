@@ -131,6 +131,19 @@ static class Program
             Console.Error.WriteLine($"[bridge] failed to bind port {Port}: {e.Message}");
         }
 
+        // Wired fallback: if the clock is plugged in over USB, push the same
+        // payloads down the serial line (works around AP client isolation;
+        // a wired-only clock also gets its time and weather this way).
+        var feeds = new SerialFrameScheduler();
+        feeds.Add("STATUS", TimeSpan.FromSeconds(5), () => SerialProtocol.Frame("STATUS", service.Snapshot().ToJson()));
+        feeds.Add("STOCK", TimeSpan.FromSeconds(5), () => SerialProtocol.Frame("STOCK", stockMonitor.ToJson(maxRows: 4)));
+        feeds.Add("NET", TimeSpan.FromSeconds(2), () => SerialProtocol.Frame("NET", netMonitor.ToJson(SystemStatsMonitor.Snapshot())));
+        feeds.Add("PC", TimeSpan.FromSeconds(1), () => SerialProtocol.Frame("PC", pcMonitor.Snapshot().ToJson()));
+        feeds.Add("WEATHER", TimeSpan.FromMinutes(1), () => SerialProtocol.Frame("WEATHER", weather.ToJson()));
+        feeds.Add("TIME", TimeSpan.FromMinutes(1), () => SerialProtocol.Time(DateTimeOffset.UtcNow));
+        using var serialLink = new SerialLink(feeds);
+        serialLink.Start();
+
         var context = new TrayAppContext(service, usage, netMonitor, nowPlaying, spectrum,
             stockMonitor, pcMonitor, weather, Port);
         usage.StartAutoRefresh();

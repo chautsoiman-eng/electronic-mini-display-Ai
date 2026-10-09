@@ -82,9 +82,11 @@ sealed class StockMonitor
         get { lock (_lock) return _rows; }
     }
 
-    public byte[] ToJson()
+    /// maxRows trims the serial frame to what the device shows (MAX_STOCKS = 4),
+    /// so a long watchlist cannot outgrow the firmware's serial line buffer.
+    public byte[] ToJson(int maxRows = int.MaxValue)
     {
-        var stocks = Snapshot.Select(r => new Dictionary<string, object>
+        var stocks = Snapshot.Take(maxRows).Select(r => new Dictionary<string, object>
         {
             ["code"] = r.Code, ["name"] = r.Name, ["price"] = r.Price,
             ["pct"] = r.Pct, ["up"] = r.Up,

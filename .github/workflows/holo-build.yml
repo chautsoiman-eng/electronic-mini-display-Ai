@@ -42,6 +42,7 @@ jobs:
       - run: dotnet run --project windows-app/Clock.Tests/Clock.Tests.csproj -c Release -- previews
       - run: dotnet run --project windows-app/Dashboard.Tests/Dashboard.Tests.csproj -c Release -- previews
       - run: dotnet run --project windows-app/Petdex.Tests/Petdex.Tests.csproj -c Release
+      - run: dotnet run --project windows-app/Serial.Tests/Serial.Tests.csproj -c Release
       - name: Audit direct and transitive NuGet dependencies
         shell: pwsh
         run: |

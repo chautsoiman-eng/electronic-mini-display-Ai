@@ -245,7 +245,7 @@ sealed class TrayAppContext : ApplicationContext
         var host = DeviceClient.Host;
         if (host.Length == 0)
         {
-            _deviceInfoItem.Text = "设备：未设置地址";
+            _deviceInfoItem.Text = DeviceClient.WiredLinked ? $"设备：{WiredText()}" : "设备：未设置地址";
             foreach (var item in _modeItems.Values) item.Checked = false;
             _mirrorItem.Checked = false;
             return;
@@ -258,7 +258,9 @@ sealed class TrayAppContext : ApplicationContext
         }
         catch (Exception)
         {
-            _deviceInfoItem.Text = $"设备：{host}（无法连接）";
+            _deviceInfoItem.Text = DeviceClient.WiredLinked
+                ? $"设备：{host} 无法连接 · {WiredText()}"
+                : $"设备：{host}（无法连接）";
             foreach (var item in _modeItems.Values) item.Checked = false;
             // self-heal: the device may have moved to a new DHCP address;
             // if it recently polled us from a different IP, adopt that.
@@ -287,6 +289,13 @@ sealed class TrayAppContext : ApplicationContext
             $"设备：{info.Ip} · 正在显示 {showing} · {string.Join(" ", sprites)}";
         foreach (var (mode, item) in _modeItems) item.Checked = mode == info.Mode;
         _mirrorItem.Checked = info.HorizontalMirror;
+    }
+
+    static string WiredText()
+    {
+        var link = SerialLink.Current;
+        var fw = link?.Firmware is { Length: > 0 } v ? $" · 固件 {v}" : "";
+        return $"USB 有线 {link?.PortName}{fw}";
     }
 
     // MARK: - pairing

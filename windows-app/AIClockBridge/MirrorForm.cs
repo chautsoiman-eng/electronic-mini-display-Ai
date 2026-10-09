@@ -589,8 +589,10 @@ sealed class MirrorForm : Form
             if (!Visible) return;
             _mirror.DeviceOK = false;
             _mirror.Invalidate();
-            _statusLabel.Text = DeviceClient.Host.Length == 0
-                ? "未设置设备地址（右键托盘 → 设置设备地址）" : $"无法连接 {DeviceClient.Host}";
+            _statusLabel.Text = DeviceClient.WiredLinked
+                ? $"USB 有线已连接 {SerialLink.Current?.PortName}（屏幕切换/亮度可用，镜像需 WiFi）"
+                : DeviceClient.Host.Length == 0
+                    ? "未设置设备地址（右键托盘 → 设置设备地址）" : $"无法连接 {DeviceClient.Host}";
             return;
         }
         if (!Visible) return;
