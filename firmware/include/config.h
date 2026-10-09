@@ -28,6 +28,7 @@
 // ---- Backlight ----
 #define BRIGHTNESS_FILE "/brightness.txt"
 #define MIRROR_FILE "/mirror.txt"
+#define ADMIN_PASSWORD_FILE "/admin_pass.txt"
 #define BRIGHTNESS_DEFAULT 100
 #define BRIGHTNESS_PWM_FREQ 2000 // Hz; high enough to avoid visible flicker when dim
 

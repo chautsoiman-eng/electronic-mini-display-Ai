@@ -37,6 +37,7 @@ static class DeviceClient
 {
     const string HostKey = "device_host";
     const string LastSeenKey = "device_last_seen";
+    const string PasswordKey = "device_password";
 
     // per-request CancellationTokenSources carry the timeouts (5s info, 8s
     // posts, 30s sprite pull, 60s GIF upload+on-device decode), so the client
@@ -47,6 +48,32 @@ static class DeviceClient
     {
         get => Settings.Get(HostKey);
         set => Settings.Set(HostKey, value);
+    }
+
+    /// The device's optional web admin password (user "admin"), sent only to
+    /// the configured host on requests that change the device.
+    public static string Password
+    {
+        get => Settings.Get(PasswordKey);
+        set => Settings.Set(PasswordKey, value ?? "");
+    }
+
+    static HttpRequestMessage Authorized(HttpMethod method, Uri url, HttpContent content)
+    {
+        var req = new HttpRequestMessage(method, url) { Content = content };
+        var pass = Password;
+        if (pass.Length > 0)
+            req.Headers.Authorization = new AuthenticationHeaderValue("Basic",
+                Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("admin:" + pass)));
+        return req;
+    }
+
+    /// POST /api/password — sets (or clears, when empty) the device's admin
+    /// password. Over USB it needs no current password (physical access).
+    public static async Task SetDevicePassword(string newPassword)
+    {
+        if (SerialLink.Current?.TrySend(SerialProtocol.Command(adminPassword: newPassword)) == true) return;
+        await PostForm("api/password", new() { ["password"] = newPassword });
     }
 
     /// Last LAN address that polled our /status — i.e. the clock itself.
@@ -162,10 +189,11 @@ static class DeviceClient
         filePart.Headers.ContentType = new MediaTypeHeaderValue("image/gif");
         content.Add(filePart, "file", "pet.gif");
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60)); // on-device decode
+        using var req = Authorized(HttpMethod.Post, url, content);
         HttpResponseMessage resp;
         try
         {
-            resp = await Http.PostAsync(url, content, cts.Token);
+            resp = await Http.SendAsync(req, cts.Token);
         }
         catch (Exception e)
         {
@@ -203,10 +231,11 @@ static class DeviceClient
         var url = Resolve(path);
         using var content = new FormUrlEncodedContent(fields);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        using var req = Authorized(HttpMethod.Post, url, content);
         HttpResponseMessage resp;
         try
         {
-            resp = await Http.PostAsync(url, content, cts.Token);
+            resp = await Http.SendAsync(req, cts.Token);
         }
         catch (Exception e)
         {
@@ -218,6 +247,10 @@ static class DeviceClient
     static async Task ThrowUnlessOk(HttpResponseMessage resp)
     {
         if (resp.IsSuccessStatusCode) return;
+        if (resp.StatusCode == HttpStatusCode.Unauthorized)
+            throw new DeviceException(Password.Length == 0
+                ? "设备已设置管理密码，请右键托盘 → 设备管理密码… 填写"
+                : "设备管理密码不正确，请右键托盘 → 设备管理密码… 重新填写");
         var msg = "";
         try { msg = await resp.Content.ReadAsStringAsync(); } catch { }
         throw new DeviceException($"设备返回 HTTP {(int)resp.StatusCode} {msg}");

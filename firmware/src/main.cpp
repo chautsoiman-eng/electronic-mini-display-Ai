@@ -233,6 +233,33 @@ void loadBrightness() {
   if (v >= 0 && v <= 100) brightness = v;
 }
 
+// Optional admin password for the device's web page and control API. Empty =
+// open, like before. Clearable over USB (#CMD {"admin_password":""}) because
+// that needs physical access to the clock.
+String adminPassword;
+
+void loadAdminPassword() {
+  adminPassword = "";
+  File f = LittleFS.open(ADMIN_PASSWORD_FILE, "r");
+  if (!f) return;
+  adminPassword = f.readStringUntil('\n');
+  adminPassword.trim();
+  f.close();
+}
+
+void saveAdminPassword(const String &pass) {
+  adminPassword = pass;
+  adminPassword.trim();
+  if (adminPassword.length() == 0) {
+    LittleFS.remove(ADMIN_PASSWORD_FILE);
+    return;
+  }
+  File f = LittleFS.open(ADMIN_PASSWORD_FILE, "w");
+  if (!f) return;
+  f.println(adminPassword);
+  f.close();
+}
+
 void saveBrightness() {
   File f = LittleFS.open(BRIGHTNESS_FILE, "w");
   if (!f) return;
@@ -2046,6 +2073,8 @@ void handleSerialFrame(char *line) {
       else if (m == "pc") displayMode = MODE_PC;
       // the effectiveMode transition handler in loop() repaints the chrome
     }
+    // USB = physical access: allowed to set or clear the web admin password
+    if (doc["admin_password"].is<const char *>()) saveAdminPassword(doc["admin_password"].as<const char *>());
     if (doc["mirror"].is<bool>()) {
       mirrorHorizontal = doc["mirror"].as<bool>();
       applyHorizontalMirror();
@@ -2086,7 +2115,20 @@ String htmlEscape(const String &s) {
   return out;
 }
 
+bool adminAuthorized() {
+  return adminPassword.length() == 0 || webServer.authenticate("admin", adminPassword.c_str());
+}
+
+// Gate for every page/endpoint that changes the device. Sends the browser's
+// Basic-auth prompt (user "admin") when the password is set and missing/wrong.
+bool requireAdmin() {
+  if (adminAuthorized()) return true;
+  webServer.requestAuthentication(BASIC_AUTH, "AI Clock");
+  return false;
+}
+
 void handleRoot() {
+  if (!requireAdmin()) return;
   String age = everPolled ? String((millis() - lastSuccessMs) / 1000) + "s ago" : "never";
   String html;
   html.reserve(3072);
@@ -2146,6 +2188,14 @@ void handleRoot() {
                                         : "5h ?") + "</td></tr>";
   html += "</table>";
 
+  html += "<h2 style='font-size:16px;margin-top:28px'>管理密码</h2>";
+  html += "<p style='font-size:13px;color:#555'>设置后，打开此页面和电脑端切换屏幕、亮度、上传桌宠都需要密码"
+          "（用户名 admin）。留空保存 = 取消密码。忘记密码可在电脑端经 USB 清除。当前：";
+  html += adminPassword.length() ? "已设置" : "未设置";
+  html += "</p><form method='POST' action='/api/password'><input type='hidden' name='from' value='web'>";
+  html += "<input type='password' name='password' autocomplete='new-password' placeholder='新密码（留空 = 取消）'>";
+  html += "<button type='submit'>保存密码</button></form>";
+
   html += "<form method='POST' action='/reset-wifi' onsubmit=\"return confirm('清除 WiFi "
           "设置并重启？设备会开启配网热点。');\">";
   html += "<button type='submit' style='background:#dc2626'>重置 WiFi</button>";
@@ -2156,6 +2206,7 @@ void handleRoot() {
 }
 
 void handleSave() {
+  if (!requireAdmin()) return;
   String newHost = webServer.arg("bridge");
   newHost.trim();
   bridgeHost = newHost;
@@ -2212,6 +2263,7 @@ void handleApiInfo() {
 }
 
 void handleApiDisplay() {
+  if (!requireAdmin()) return;
   String mode = webServer.arg("mode");
   if (mode == "auto") displayMode = MODE_AUTO;
   else if (mode == "claude") displayMode = MODE_CLAUDE;
@@ -2232,6 +2284,7 @@ void handleApiDisplay() {
 }
 
 void handleApiBrightness() {
+  if (!requireAdmin()) return;
   String levelArg = webServer.arg("level");
   if (levelArg.length() == 0) {
     webServer.send(400, "text/plain", "missing level (0-100)");
@@ -2248,6 +2301,7 @@ void handleApiBrightness() {
 }
 
 void handleApiMirror() {
+  if (!requireAdmin()) return;
   if (!webServer.hasArg("enabled")) {
     webServer.send(400, "text/plain", "missing enabled (0|1)");
     return;
@@ -2260,6 +2314,7 @@ void handleApiMirror() {
 }
 
 void handleApiBridge() {
+  if (!requireAdmin()) return;
   String newHost = webServer.arg("host");
   newHost.trim();
   if (newHost.length() == 0) {
@@ -2304,6 +2359,7 @@ void handleSpriteRaw(ActiveApp slot) {
 
 // Removes a custom sprite so the compiled-in default animation comes back.
 void handleSpriteReset(ActiveApp slot) {
+  if (!requireAdmin()) return;
   const char *binPath = (slot == APP_CLAUDE) ? CLAUDE_SPRITE_FILE : CODEX_SPRITE_FILE;
   LittleFS.remove(binPath);
   spriteRev++;
@@ -2315,7 +2371,22 @@ void handleSpriteReset(ActiveApp slot) {
   webServer.send(200, "text/plain", "ok");
 }
 
+void handleApiPassword() {
+  if (!requireAdmin()) return;
+  saveAdminPassword(webServer.arg("password"));
+  Serial.printf("[api] admin password %s\n", adminPassword.length() ? "set" : "cleared");
+  // the web form gets redirected back (the browser re-prompts with the new
+  // password); API callers (bridges) just get 200
+  if (webServer.arg("from") == "web") {
+    webServer.sendHeader("Location", "/");
+    webServer.send(303);
+  } else {
+    webServer.send(200, "text/plain", "ok");
+  }
+}
+
 void handleResetWifi() {
+  if (!requireAdmin()) return;
   webServer.send(200, "text/html", "<html><body>Resetting WiFi, device will restart...</body></html>");
   delay(200);
   WiFiManager wm;
@@ -2513,11 +2584,14 @@ bool decodeGifToBin(const char *gifPath, const char *binPath, int targetW, int t
 // upload over its streaming multipart/HTTPUpload path, writing the raw .gif to
 // LittleFS in small chunks, then decode it on the done callback.
 File uploadFile;
+bool uploadAuthorized = false;
 
 void handleSpriteUploadChunk(const char *gifPath) {
   HTTPUpload &upload = webServer.upload();
   if (upload.status == UPLOAD_FILE_START) {
-    uploadFile = LittleFS.open(gifPath, "w");
+    // unauthorized uploads are drained without touching LittleFS
+    uploadAuthorized = adminAuthorized();
+    if (uploadAuthorized) uploadFile = LittleFS.open(gifPath, "w");
   } else if (upload.status == UPLOAD_FILE_WRITE) {
     if (uploadFile) uploadFile.write(upload.buf, upload.currentSize);
   } else if (upload.status == UPLOAD_FILE_END || upload.status == UPLOAD_FILE_ABORTED) {
@@ -2526,6 +2600,11 @@ void handleSpriteUploadChunk(const char *gifPath) {
 }
 
 void handleSpriteUploadDone(ActiveApp slot) {
+  if (!uploadAuthorized) {
+    webServer.requestAuthentication(BASIC_AUTH, "AI Clock");
+    return;
+  }
+  uploadAuthorized = false;
   const char *gifPath = (slot == APP_CLAUDE) ? CLAUDE_GIF_FILE : CODEX_GIF_FILE;
   const char *binPath = (slot == APP_CLAUDE) ? CLAUDE_SPRITE_FILE : CODEX_SPRITE_FILE;
   int tw = (slot == APP_CLAUDE) ? CLAUDE_SPRITE_W : CODEX_SPRITE_W;
@@ -2559,6 +2638,7 @@ void setupWebServer() {
   webServer.on("/api/bridge", HTTP_POST, handleApiBridge);
   webServer.on("/api/brightness", HTTP_POST, handleApiBrightness);
   webServer.on("/api/mirror", HTTP_POST, handleApiMirror);
+  webServer.on("/api/password", HTTP_POST, handleApiPassword);
   webServer.on("/sprite/claude/reset", HTTP_POST, []() { handleSpriteReset(APP_CLAUDE); });
   webServer.on("/sprite/codex/reset", HTTP_POST, []() { handleSpriteReset(APP_CODEX); });
   webServer.on("/sprite/claude/raw", HTTP_GET, []() { handleSpriteRaw(APP_CLAUDE); });
@@ -2581,6 +2661,7 @@ void setup() {
   LittleFS.begin();
   loadBridgeHost();
   loadBrightness();
+  loadAdminPassword();
   loadHorizontalMirror();
   loadCustomSpriteState();
 

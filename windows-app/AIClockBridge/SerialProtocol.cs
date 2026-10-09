@@ -35,10 +35,13 @@ static class SerialProtocol
     public static byte[] Time(DateTimeOffset now) =>
         Frame("TIME", JsonSerializer.SerializeToUtf8Bytes(new { epoch = now.ToUnixTimeSeconds() }));
 
-    /// #CMD carrying any subset of display mode / brightness / mirror.
-    public static byte[] Command(string display = null, int? brightness = null, bool? mirror = null)
+    /// #CMD carrying any subset of display mode / brightness / mirror /
+    /// web admin password (USB = physical access, so no current password).
+    public static byte[] Command(string display = null, int? brightness = null, bool? mirror = null,
+                                 string adminPassword = null)
     {
         var cmd = new Dictionary<string, object>();
+        if (adminPassword != null) cmd["admin_password"] = adminPassword;
         if (display != null) cmd["display"] = display;
         if (brightness is int level) cmd["brightness"] = Math.Clamp(level, 0, 100);
         if (mirror is bool m) cmd["mirror"] = m;

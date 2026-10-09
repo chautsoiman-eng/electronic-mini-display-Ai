@@ -5,7 +5,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
   <ItemGroup>
-    <!-- 直接測試 USB 串口訊框、切行與節流邏輯；不需要實機或 COM 埠。 -->
+    <!-- 直接測試 USB 串口訊框、切行、節流與 bridge HTTP 安全規則；不需要實機或 COM 埠。 -->
     <Compile Include="../AIClockBridge/SerialProtocol.cs" Link="SerialProtocol.cs" />
+    <Compile Include="../AIClockBridge/MiniHttpServer.cs" Link="MiniHttpServer.cs" />
   </ItemGroup>
 </Project>

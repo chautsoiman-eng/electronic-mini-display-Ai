@@ -106,4 +106,42 @@ for (int i = 0; i < 5; i++)
     if (scheduler.Next(t0.AddSeconds(61)) is { } r) firstAfterReset.Add(r.Tag);
 Check(firstAfterReset.Count == 5, "reset makes every feed due immediately");
 
-Console.WriteLine($"PASS: {checks} serial protocol assertions");
+// USB can set/clear the device admin password (physical access).
+var setPass = Cmd(SerialProtocol.Command(adminPassword: "s3cret"));
+Check(setPass.GetProperty("admin_password").GetString() == "s3cret", "admin password over USB");
+Check(Cmd(SerialProtocol.Command(adminPassword: "")).GetProperty("admin_password").GetString() == "",
+    "empty admin password clears it");
+Check(!Cmd(SerialProtocol.Command(display: "auto")).TryGetProperty("admin_password", out _),
+    "password only sent when asked");
+
+// Bridge HTTP: hook events only from this PC and never from a browser page.
+Check(MiniHttpServer.PostAllowed("127.0.0.1", new[] { "POST /event HTTP/1.1" }), "loopback curl allowed");
+Check(MiniHttpServer.PostAllowed("::1", new[] { "POST /event HTTP/1.1" }), "IPv6 loopback allowed");
+Check(!MiniHttpServer.PostAllowed("192.168.1.50", new[] { "POST /event HTTP/1.1" }), "LAN POST rejected");
+Check(!MiniHttpServer.PostAllowed("", new string[0]), "unknown peer rejected");
+Check(!MiniHttpServer.PostAllowed("127.0.0.1", new[] { "POST /event HTTP/1.1", "Origin: https://evil.example" }),
+    "browser POST rejected");
+
+int events = 0;
+using (var server = new MiniHttpServer(0, new() { ["/status"] = () => Bytes("{}") },
+    postRoutes: new() { ["/event"] = _ => { events++; return Bytes("{\"ok\":true}"); } },
+    bindAddress: System.Net.IPAddress.Loopback))
+{
+    server.Start();
+    using var http = new HttpClient();
+    var url = $"http://127.0.0.1:{server.BoundPort}";
+    var ok = await http.PostAsync(url + "/event", new StringContent("{\"agent\":\"claude\",\"event\":\"Stop\"}"));
+    Check(ok.IsSuccessStatusCode && events == 1, "local hook event accepted");
+    using var fromPage = new HttpRequestMessage(HttpMethod.Post, url + "/event")
+    {
+        Content = new StringContent("{\"agent\":\"claude\",\"event\":\"Stop\"}"),
+    };
+    fromPage.Headers.Add("Origin", "https://evil.example");
+    var blocked = await http.SendAsync(fromPage);
+    Check((int)blocked.StatusCode == 403 && events == 1, "browser-originated event blocked");
+    var statusResp = await http.GetAsync(url + "/status");
+    Check(statusResp.IsSuccessStatusCode, "status still readable");
+    Check(!statusResp.Headers.Contains("Access-Control-Allow-Origin"), "no CORS for web pages");
+}
+
+Console.WriteLine($"PASS: {checks} serial protocol and bridge security assertions");

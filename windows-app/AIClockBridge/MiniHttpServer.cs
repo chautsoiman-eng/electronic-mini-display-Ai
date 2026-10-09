@@ -120,7 +120,7 @@ sealed class MiniHttpServer : IDisposable
                 int bodyEnd = Math.Min(buf.Count, bodyStart + contentLength);
                 var requestBody = buf.GetRange(bodyStart, Math.Max(0, bodyEnd - bodyStart)).ToArray();
 
-                var response = BuildResponse(client, method, path, requestBody);
+                var response = BuildResponse(client, method, path, requestBody, headerLines);
                 await stream.WriteAsync(response);
             }
             catch
@@ -140,7 +140,18 @@ sealed class MiniHttpServer : IDisposable
         return -1;
     }
 
-    byte[] BuildResponse(TcpClient client, string method, string path, byte[] requestBody)
+    /// POST routes (Claude Code / Codex hook events) are for this PC only:
+    /// loopback callers, and never a browser (browsers always send Origin on a
+    /// cross-site POST), so neither the LAN nor a web page can fake events.
+    /// GET routes stay LAN-readable because the clock itself polls them.
+    public static bool PostAllowed(string remoteIp, IEnumerable<string> headerLines)
+    {
+        if (!IPAddress.TryParse(remoteIp, out var addr) || !IPAddress.IsLoopback(addr)) return false;
+        return !headerLines.Any(l => l.StartsWith("origin:", StringComparison.OrdinalIgnoreCase));
+    }
+
+    byte[] BuildResponse(TcpClient client, string method, string path, byte[] requestBody,
+                         IEnumerable<string> headerLines)
     {
         var clean = path.Split('?')[0];
         var ip = (client.Client.RemoteEndPoint as IPEndPoint)?.Address?.ToString() ?? "";
@@ -149,7 +160,13 @@ sealed class MiniHttpServer : IDisposable
 
         byte[] body;
         string statusLine, contentType;
-        if (method == "POST" && _postRoutes.TryGetValue(clean, out var postHandler))
+        if (method == "POST" && _postRoutes.ContainsKey(clean) && !PostAllowed(ip, headerLines))
+        {
+            body = Encoding.UTF8.GetBytes("{\"ok\":false,\"error\":\"local only\"}");
+            statusLine = "403 Forbidden";
+            contentType = "application/json";
+        }
+        else if (method == "POST" && _postRoutes.TryGetValue(clean, out var postHandler))
         {
             body = postHandler(requestBody);
             statusLine = "200 OK";
@@ -177,7 +194,6 @@ sealed class MiniHttpServer : IDisposable
         var header = $"HTTP/1.1 {statusLine}\r\n"
             + $"Content-Type: {contentType}\r\n"
             + $"Content-Length: {body.Length}\r\n"
-            + "Access-Control-Allow-Origin: *\r\n"
             + "Connection: close\r\n\r\n";
         var headerBytes = Encoding.UTF8.GetBytes(header);
         var response = new byte[headerBytes.Length + body.Length];

@@ -77,6 +77,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(makeItem("自动查找并配对设备", #selector(autoPairAction)))
         menu.addItem(makeItem("设置设备地址…", #selector(setDeviceAddress)))
         menu.addItem(makeItem("打开设备网页", #selector(openDevicePage)))
+        menu.addItem(makeItem("设备管理密码…", #selector(setDevicePassword)))
 
         let displayMenu = NSMenu()
         for (title, mode) in [("自动（谁在干活显示谁）", "auto"), ("固定 Claude", "claude"),
@@ -236,6 +237,32 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         if alert.runModal() == .alertFirstButtonReturn {
             DeviceClient.host = input.stringValue.trimmingCharacters(in: .whitespaces)
             refreshDeviceSection()
+        }
+    }
+
+    /// Saves the password locally and applies it to the device: over USB
+    /// directly, otherwise via HTTP authenticated with the previous password.
+    @objc private func setDevicePassword() {
+        let alert = NSAlert()
+        alert.messageText = "设备管理密码"
+        alert.informativeText = "设置后，切换屏幕、亮度、上传桌宠等都需要此密码（设备网页用户名 admin）。\n留空 = 取消密码。"
+        let input = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        input.stringValue = DeviceClient.password
+        input.placeholderString = "留空 = 不使用密码"
+        alert.accessoryView = input
+        alert.addButton(withTitle: "保存")
+        alert.addButton(withTitle: "取消")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let newPassword = input.stringValue.trimmingCharacters(in: .whitespaces)
+        DeviceClient.setDevicePassword(newPassword) { error in
+            // keep it locally either way: the device may already use this password
+            DeviceClient.password = newPassword
+            if let error = error {
+                Self.toast("已保存在本机", "未能写入设备：\(error.localizedDescription)\n若设备上已是此密码可忽略；忘记密码可插 USB 后再设置一次来清除。")
+            } else {
+                Self.toast("已设置", newPassword.isEmpty ? "已取消设备管理密码" : "设备管理密码已更新并保存在本机")
+            }
         }
     }
 

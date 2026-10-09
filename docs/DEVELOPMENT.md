@@ -200,11 +200,20 @@ pio device monitor -b 115200
 | POST | `/api/display` | `mode=auto\|claude\|codex\|clock\|weather\|net\|music\|holo_ai\|pc` 切换屏幕显示 |
 | POST | `/api/mirror` | `enabled=0\|1` 設定並保存 45° 全息用水平鏡像 |
 | POST | `/api/bridge` | `host=ip:port` 设置桥接地址 |
+| POST | `/api/password` | `password=...` 设置设备管理密码，留空 = 取消 |
 | POST | `/sprite/claude`、`/sprite/codex` | multipart 上传 GIF 并板上解码替换 |
 | POST | `/sprite/claude/reset`、`/sprite/codex/reset` | 删除自定义动画，恢复内置形象 |
 | GET | `/sprite/claude/raw`、`/sprite/codex/raw` | 当前生效动画的原始帧流 `[1B帧数][RGB565大端帧...]`（镜像窗口用）|
 
 `/api/info` 里的 `sprite_rev` 在每次上传/重置动画后自增，镜像端据此决定是否重新拉帧。
+
+**管理密码（可选）**：设置后，设备网页 `/` 与所有 POST 接口都要 HTTP Basic 认证（用户名 `admin`）；
+`/api/info` 与 `/sprite/*/raw` 仍可直接读取。桥接端（托盘 / 菜单栏「设备管理密码…」）会把密码存在本机
+并自动带上。忘记密码：插 USB 后在桥接端重新设置（USB `#CMD {"admin_password":""}` 可直接清除，因为需要实体接触设备）。
+注意：局域网内是明文 HTTP，密码防的是同网段的人随手乱改，不能防窃听。
+
+**桥接端** `POST /event` 只接受本机（127.0.0.1 / ::1）调用，且拒绝带 `Origin` 头的浏览器请求；
+桥接端不再返回 `Access-Control-Allow-Origin: *`，网页无法读取额度数据。`GET /status` 等仍对局域网开放（设备要轮询）。
 
 ## 5. 网速曲线页（Mac + 设备同步显示）
 

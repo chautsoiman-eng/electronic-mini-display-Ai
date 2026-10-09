@@ -83,6 +83,7 @@ sealed class TrayAppContext : ApplicationContext
         _menu.Items.Add(MakeItem("自动查找并配对设备", async (_, _) => await AutoPairAction()));
         _menu.Items.Add(MakeItem("设置设备地址…", (_, _) => SetDeviceAddress()));
         _menu.Items.Add(MakeItem("打开设备网页", (_, _) => OpenDevicePage()));
+        _menu.Items.Add(MakeItem("设备管理密码…", async (_, _) => await SetDevicePasswordAction()));
 
         var displayMenu = new ToolStripMenuItem("屏幕显示");
         foreach (var (title, mode) in new[]
@@ -317,6 +318,29 @@ sealed class TrayAppContext : ApplicationContext
         _ = RefreshDeviceSection();
     }
 
+    /// Saves the password locally and applies it to the device: over USB
+    /// directly, otherwise via HTTP authenticated with the previous password.
+    async Task SetDevicePasswordAction()
+    {
+        var input = InputDialog.Show("设备管理密码",
+            "设置后，切换屏幕、亮度、上传桌宠等都需要此密码（设备网页用户名 admin）。\n留空 = 取消密码。",
+            DeviceClient.Password, "留空 = 不使用密码", password: true);
+        if (input == null) return;
+        var newPassword = input.Trim();
+        try
+        {
+            await DeviceClient.SetDevicePassword(newPassword);
+            DeviceClient.Password = newPassword;
+            Toast("已设置", newPassword.Length == 0 ? "已取消设备管理密码" : "设备管理密码已更新并保存在本机");
+        }
+        catch (Exception e)
+        {
+            // keep it locally anyway: the device may already use this password
+            DeviceClient.Password = newPassword;
+            Toast("已保存在本机", $"未能写入设备：{e.Message}\n若设备上已是此密码可忽略；忘记密码可插 USB 后再设置一次来清除。");
+        }
+    }
+
     void OpenDevicePage()
     {
         var url = DeviceClient.BaseUrl;
@@ -396,7 +420,8 @@ sealed class TrayAppContext : ApplicationContext
 // Small modal prompt, the NSAlert-with-text-field equivalent.
 static class InputDialog
 {
-    public static string Show(string title, string message, string value, string placeholder)
+    public static string Show(string title, string message, string value, string placeholder,
+                              bool password = false)
     {
         using var form = new Form
         {
@@ -412,7 +437,7 @@ static class InputDialog
         };
         var label = new Label { Text = message };
         label.SetBounds(14, 12, 352, 40);
-        var textBox = new TextBox { Text = value, PlaceholderText = placeholder };
+        var textBox = new TextBox { Text = value, PlaceholderText = placeholder, UseSystemPasswordChar = password };
         textBox.SetBounds(14, 58, 352, 24);
         var ok = new Button { Text = "保存", DialogResult = DialogResult.OK };
         ok.SetBounds(196, 96, 80, 28);

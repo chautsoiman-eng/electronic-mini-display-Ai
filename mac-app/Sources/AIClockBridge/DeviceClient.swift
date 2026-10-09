@@ -23,6 +23,40 @@ struct DeviceInfo {
 final class DeviceClient {
     private static let hostKey = "device_host"
     private static let lastSeenKey = "device_last_seen"
+    private static let passwordKey = "device_password"
+
+    /// The device's optional web admin password (user "admin"), sent only to
+    /// the configured host on requests that change the device.
+    static var password: String {
+        get { UserDefaults.standard.string(forKey: passwordKey) ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: passwordKey) }
+    }
+
+    private static func authorize(_ req: inout URLRequest) {
+        let pass = password
+        guard !pass.isEmpty else { return }
+        let token = Data("admin:\(pass)".utf8).base64EncodedString()
+        req.setValue("Basic \(token)", forHTTPHeaderField: "Authorization")
+    }
+
+    /// Display/brightness go over USB #CMD when the clock is plugged in
+    /// (instant, works with no WiFi or AP isolation), otherwise over HTTP.
+    private static func wiredFirst(_ fields: [String: Any], completion: @escaping (Error?) -> Void,
+                                   http: () -> Void) {
+        if SerialLink.current?.trySendCommand(fields) == true {
+            DispatchQueue.main.async { completion(nil) }
+        } else {
+            http()
+        }
+    }
+
+    /// POST /api/password — sets (or clears, when empty) the device's admin
+    /// password. Over USB it needs no current password (physical access).
+    static func setDevicePassword(_ newPassword: String, completion: @escaping (Error?) -> Void) {
+        wiredFirst(["admin_password": newPassword], completion: completion) {
+            postForm(path: "api/password", fields: ["password": newPassword], completion: completion)
+        }
+    }
 
     static var host: String {
         get { UserDefaults.standard.string(forKey: hostKey) ?? "" }
@@ -83,7 +117,9 @@ final class DeviceClient {
 
     /// POST /api/display  mode=auto|claude|codex|net|music
     static func setDisplayMode(_ mode: String, completion: @escaping (Error?) -> Void) {
-        postForm(path: "api/display", fields: ["mode": mode], completion: completion)
+        wiredFirst(["display": mode], completion: completion) {
+            postForm(path: "api/display", fields: ["mode": mode], completion: completion)
+        }
     }
 
     /// POST /api/bridge  host=ip:port
@@ -93,7 +129,10 @@ final class DeviceClient {
 
     /// POST /api/brightness  level=0-100 (0 = backlight off); device persists it
     static func setBrightness(_ level: Int, completion: @escaping (Error?) -> Void) {
-        postForm(path: "api/brightness", fields: ["level": String(level)], completion: completion)
+        let clamped = max(0, min(100, level))
+        wiredFirst(["brightness": clamped], completion: completion) {
+            postForm(path: "api/brightness", fields: ["level": String(clamped)], completion: completion)
+        }
     }
 
     /// POST /sprite/{claude|codex}  multipart GIF upload — the device decodes
@@ -115,6 +154,7 @@ final class DeviceClient {
         body.append(gif)
         body.append(Data("\r\n--\(boundary)--\r\n".utf8))
         req.httpBody = body
+        authorize(&req)
         run(req, completion: completion)
     }
 
@@ -161,13 +201,18 @@ final class DeviceClient {
         req.httpBody = Data(fields.map { k, v in
             "\(k)=\(v.addingPercentEncoding(withAllowedCharacters: allowed) ?? v)"
         }.joined(separator: "&").utf8)
+        authorize(&req)
         run(req, completion: completion)
     }
 
     private static func run(_ req: URLRequest, completion: @escaping (Error?) -> Void) {
         URLSession.shared.dataTask(with: req) { data, resp, error in
             var err = error
-            if err == nil, let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            if err == nil, let http = resp as? HTTPURLResponse, http.statusCode == 401 {
+                err = NSError(domain: "DeviceClient", code: 401, userInfo: [NSLocalizedDescriptionKey:
+                    password.isEmpty ? "设备已设置管理密码，请在菜单 → 设备管理密码… 填写"
+                                     : "设备管理密码不正确，请在菜单 → 设备管理密码… 重新填写"])
+            } else if err == nil, let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
                 let msg = data.map { String(decoding: $0, as: UTF8.self) } ?? ""
                 err = NSError(domain: "DeviceClient", code: http.statusCode,
                               userInfo: [NSLocalizedDescriptionKey: "设备返回 HTTP \(http.statusCode) \(msg)"])
