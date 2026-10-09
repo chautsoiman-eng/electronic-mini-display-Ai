@@ -1653,42 +1653,68 @@ void drawPcScreen() {
   pcDirty = false;
   tft.fillScreen(TFT_BLACK);
   tft.setTextDatum(TL_DATUM);
-  uint16_t cyan = tft.color565(88, 220, 222), muted = tft.color565(113, 151, 164);
-  uint16_t grid = tft.color565(24, 71, 82);
+  const uint16_t cyan = tft.color565(88, 220, 222);
+  const uint16_t muted = tft.color565(113, 151, 164);
+  const uint16_t grid = tft.color565(24, 71, 82);
+  const uint16_t track = tft.color565(21, 48, 57);
+
+  // Same native 240x240 coordinates as Windows PcMonitorScene.Draw().
+  // Bottom 12px remain empty to avoid clipping on the panel.
+  tft.setTextColor(cyan, TFT_BLACK);
+  tft.drawString("PC MONITOR", 14, 8, 2);
+  tft.setTextDatum(TR_DATUM);
   tft.setTextColor(stale ? TFT_ORANGE : cyan, TFT_BLACK);
-  tft.drawString(stale ? "PC / DATA STALE" : "PC / MONITOR", 14, 8, 2);
+  tft.drawString(stale ? "STALE" : "LIVE", 226, 8, 2);
   tft.drawFastHLine(14, 29, 212, grid);
-  const char *labels[] = {"CPU", "GPU MAX", "RAM"};
-  float values[] = {pcCpu, pcGpu, pcMem};
-  for (int i = 0; i < 3; i++) {
-    int y = 38 + i * 39;
-    float pct = stale ? -1 : values[i];
+
+  const int colX[] = {14, 126};
+  const int colW[] = {98, 100};
+  const char *labels[] = {"CPU", "GPU MAX"};
+  float pct[] = {stale ? -1 : pcCpu, stale ? -1 : pcGpu};
+  float temps[] = {stale ? -1000 : pcCpuTemp, stale ? -1000 : pcGpuTemp};
+  for (int i = 0; i < 2; i++) {
     tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(muted, TFT_BLACK);
+    tft.drawString(labels[i], colX[i], 37, 2);
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.drawString(labels[i], 14, y, 2);
-    tft.setTextDatum(TR_DATUM);
-    tft.drawString(pct < 0 ? "--" : String((int)(pct + 0.5f)) + "%", 226, y, 2);
-    tft.fillRect(14, y + 18, 212, 6, tft.color565(21, 48, 57));
-    if (pct >= 0) tft.fillRect(14, y + 18, (int)(212 * pct / 100), 6, pct >= 90 ? TFT_ORANGE : cyan);
+    tft.drawString(pct[i] < 0 ? "--" : String((int)(pct[i] + .5f)) + "%", colX[i], 55, 4);
+    tft.setTextColor(muted, TFT_BLACK);
+    tft.drawString("TEMP " + (temps[i] < -20 ? String("--") :
+                   String((int)roundf(temps[i])) + "C"), colX[i], 87, 1);
+    tft.fillRect(colX[i], 103, colW[i], 6, track);
+    if (pct[i] > 0) {
+      int fill = (int)(colW[i] * pct[i] / 100);
+      tft.fillRect(colX[i], 103, fill, 6, pct[i] >= 90 ? TFT_ORANGE : cyan);
+    }
   }
+
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(muted, TFT_BLACK);
-  tft.drawString("TEMP MAX", 14, 149, 1);
+  tft.drawString("RAM", 14, 119, 2);
+  tft.setTextDatum(TR_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("CPU " + (stale || pcCpuTemp < -20 ? String("--") : String((int)roundf(pcCpuTemp)) + "C"), 14, 164, 1);
-  tft.drawString("GPU " + (stale || pcGpuTemp < -20 ? String("--") : String((int)roundf(pcGpuTemp)) + "C"), 128, 164, 1);
-  for (int y = 187; y <= 221; y += 17) tft.drawFastHLine(14, y, 212, grid);
-  // 固定 60 點靠右對齊；缺失區段留白，不連成虛假的 0% 曲線。
+  float ram = stale ? -1 : pcMem;
+  tft.drawString(ram < 0 ? "--" : String((int)(ram + .5f)) + "%", 226, 119, 2);
+  tft.fillRect(14, 141, 212, 6, track);
+  if (ram > 0) tft.fillRect(14, 141, (int)(212 * ram / 100),
+                             6, ram >= 90 ? TFT_ORANGE : cyan);
+
+  tft.drawFastHLine(14, 158, 212, grid);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(muted, TFT_BLACK);
+  tft.drawString("CPU HISTORY", 14, 164, 2);
+  tft.setTextDatum(TR_DATUM);
+  tft.drawString("60s", 226, 164, 2);
+  for (int y = 188; y <= 226; y += 19) tft.drawFastHLine(14, y, 212, grid);
+  // Missing points break the line; history stays in the 188..226 chart.
   for (int i = 1; i < pcHistoryCount; i++) {
     if (pcHistory[i - 1] < 0 || pcHistory[i] < 0) continue;
-    int x = 14 + (60 - pcHistoryCount + i) * 212 / 59;
-    int previousX = 14 + (60 - pcHistoryCount + i - 1) * 212 / 59;
-    tft.drawLine(previousX, 221 - (int)(pcHistory[i - 1] * .34f), x, 221 - (int)(pcHistory[i] * .34f), cyan);
+    int x0 = 14 + (60 - pcHistoryCount + i - 1) * 212 / 59;
+    int x1 = 14 + (60 - pcHistoryCount + i) * 212 / 59;
+    tft.drawLine(x0, 226 - (int)(pcHistory[i - 1] * .38f),
+                 x1, 226 - (int)(pcHistory[i] * .38f), cyan);
   }
-  tft.setTextColor(muted, TFT_BLACK);
-  tft.drawString("CPU HISTORY / 60s", 14, 227, 1);
 }
-
 // ---------- wired (USB serial) bridge link ----------
 // Fallback for WiFi networks with client isolation (device can't reach the
 // bridge over LAN) - or for skipping WiFi setup entirely: when the clock is
