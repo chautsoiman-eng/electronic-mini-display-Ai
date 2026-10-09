@@ -1,57 +1,83 @@
 using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Text;
 
 namespace AIClockBridge;
 
+// Native 240x240 coordinates; shared with drawPcScreen() in firmware.
 static class PcMonitorScene
 {
     internal static readonly Color Cyan = Color.FromArgb(88, 220, 222);
     static readonly Color Muted = Color.FromArgb(113, 151, 164);
+    static readonly Color Grid = Color.FromArgb(24, 71, 82);
+    static readonly Color Track = Color.FromArgb(21, 48, 57);
     internal static string Pct(double? v) => PcTelemetry.Percent(v) is double n ? $"{n:0}%" : "--";
     internal static string Temp(double? v) => PcTelemetry.Temperature(v) is double n ? $"{n:0}C" : "--";
 
     public static void Draw(Graphics g, PcTelemetry data, bool preview = false)
     {
         using var font = new Font("Consolas", 13, FontStyle.Regular, GraphicsUnit.Pixel);
-        using var small = new Font("Consolas", 10, FontStyle.Regular, GraphicsUnit.Pixel);
+        using var big = new Font("Consolas", 27, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var small = new Font("Consolas", 11, FontStyle.Regular, GraphicsUnit.Pixel);
         using var right = new StringFormat { Alignment = StringAlignment.Far };
-        using var grid = new Pen(Color.FromArgb(24, 71, 82));
-        void Text(string text, int x, int y, Color color, bool tiny = false)
+        using var grid = new Pen(Grid);
+        using var curve = new Pen(Cyan, 1.5f);
+        g.SmoothingMode = SmoothingMode.None;
+        g.TextRenderingHint = TextRenderingHint.SingleBitPerPixelGridFit;
+
+        void Text(string s, int x, int y, Color c, Font f)
         {
-            using var brush = new SolidBrush(color);
-            g.DrawString(text, tiny ? small : font, brush, x, y);
+            using var b = new SolidBrush(c);
+            g.DrawString(s, f, b, x, y);
         }
-        void Row(string title, int y, double? pct)
+        void Right(string s, int y, Color c)
         {
-            Text(title, 14, y, Color.White);
-            g.DrawString(Pct(pct), font, Brushes.White, new RectangleF(160, y, 66, 18), right);
-            using var track = new SolidBrush(Color.FromArgb(21, 48, 57));
-            g.FillRectangle(track, 14, y + 18, 212, 6);
-            if (PcTelemetry.Percent(pct) is double value)
+            using var b = new SolidBrush(c);
+            g.DrawString(s, font, b, new RectangleF(126, y, 100, 22), right);
+        }
+        void Bar(int x, int y, int w, double? value)
+        {
+            using var track = new SolidBrush(Track);
+            g.FillRectangle(track, x, y, w, 6);
+            if (PcTelemetry.Percent(value) is double pct && pct > 0)
             {
-                using var fill = new SolidBrush(value >= 90 ? Color.OrangeRed : Cyan);
-                g.FillRectangle(fill, 14, y + 18, (int)(212 * value / 100), 6);
+                using var fill = new SolidBrush(pct >= 90 ? Color.OrangeRed : Cyan);
+                g.FillRectangle(fill, x, y, (int)(w * pct / 100), 6);
             }
         }
-        // 逾期資料不顯示為即時讀數；保留歷史並標示 STALE。
-        Text(data.Stale ? "PC / DATA STALE" : preview ? "PC / LIVE PREVIEW" : "PC / MONITOR", 14, 8,
-            data.Stale ? Color.OrangeRed : Cyan);
+
+        bool stale = data.Stale;
+        Text("PC MONITOR", 14, 8, Cyan, font);
+        Right(stale ? "STALE" : "LIVE", 8, stale ? Color.OrangeRed : Cyan);
         g.DrawLine(grid, 14, 29, 226, 29);
-        Row("CPU", 38, data.Stale ? null : data.CpuPct);
-        Row("GPU MAX", 77, data.Stale ? null : data.GpuPct);
-        Row("RAM", 116, data.Stale ? null : data.MemPct);
-        Text("TEMP MAX", 14, 149, Muted, true);
-        Text("CPU " + Temp(data.Stale ? null : data.CpuTempC), 14, 164, Color.White, true);
-        Text("GPU " + Temp(data.Stale ? null : data.GpuTempC), 128, 164, Color.White, true);
-        for (int y = 187; y <= 221; y += 17) g.DrawLine(grid, 14, y, 226, y);
-        using var curve = new Pen(Cyan);
+
+        Text("CPU", 14, 37, Muted, font);
+        Text("GPU MAX", 126, 37, Muted, font);
+        Text(Pct(stale ? null : data.CpuPct), 14, 55, Color.White, big);
+        Text(Pct(stale ? null : data.GpuPct), 126, 55, Color.White, big);
+        Text("TEMP " + Temp(stale ? null : data.CpuTempC), 14, 87, Muted, small);
+        Text("TEMP " + Temp(stale ? null : data.GpuTempC), 126, 87, Muted, small);
+        Bar(14, 103, 98, stale ? null : data.CpuPct);
+        Bar(126, 103, 100, stale ? null : data.GpuPct);
+
+        Text("RAM", 14, 119, Muted, font);
+        Right(Pct(stale ? null : data.MemPct), 119, Color.White);
+        Bar(14, 141, 212, stale ? null : data.MemPct);
+
+        g.DrawLine(grid, 14, 158, 226, 158);
+        Text("CPU HISTORY", 14, 164, Muted, font);
+        Right("60s", 164, Muted);
+        foreach (int y in new[] { 188, 207, 226 }) g.DrawLine(grid, 14, y, 226, y);
+
+        // Right-aligned 60 one-second slots; unknown samples break the line.
         var history = data.CpuHistory.TakeLast(60).ToArray();
-        // 固定 60 秒寬度，未知點斷線；短歷史靠右對齊。
         for (int i = 1; i < history.Length; i++)
         {
-            if (PcTelemetry.Percent(history[i - 1]) is not double a || PcTelemetry.Percent(history[i]) is not double b) continue;
-            float x = 14 + (60 - history.Length + i) * 212f / 59;
-            g.DrawLine(curve, x - 212f / 59, 221 - (float)a * .34f, x, 221 - (float)b * .34f);
+            if (PcTelemetry.Percent(history[i - 1]) is not double a ||
+                PcTelemetry.Percent(history[i]) is not double b) continue;
+            float x0 = 14 + (60 - history.Length + i - 1) * 212f / 59;
+            float x1 = 14 + (60 - history.Length + i) * 212f / 59;
+            g.DrawLine(curve, x0, 226 - (float)a * .38f, x1, 226 - (float)b * .38f);
         }
-        Text("CPU HISTORY / 60s", 14, 227, Muted, true);
     }
 }
