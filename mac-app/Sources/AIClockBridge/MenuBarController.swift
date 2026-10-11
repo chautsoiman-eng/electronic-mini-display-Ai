@@ -15,6 +15,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let claudeUsageItem = NSMenuItem(title: "Claude …", action: nil, keyEquivalent: "")
     private let codexUsageItem = NSMenuItem(title: "Codex …", action: nil, keyEquivalent: "")
     private let deviceInfoItem = NSMenuItem(title: "设备：未设置", action: nil, keyEquivalent: "")
+    private var horizontalMirrorItem: NSMenuItem!
     private var modeItems: [String: NSMenuItem] = [:]
 
     init(service: StatusService, usage: UsageFetcher, netMonitor: NetSpeedMonitor,
@@ -92,6 +93,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let displayItem = NSMenuItem(title: "屏幕显示", action: nil, keyEquivalent: "")
         displayItem.submenu = displayMenu
         menu.addItem(displayItem)
+        horizontalMirrorItem = makeItem("水平镜像（45° 分光镜）", #selector(toggleHorizontalMirror))
+        menu.addItem(horizontalMirrorItem)
         // (屏幕亮度在左键弹出的镜像页底部，做成滑条了)
 
         menu.addItem(makeItem("更换桌宠动画…（petdex）", #selector(openPetPicker)))
@@ -158,7 +161,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     private func refreshDeviceSection() {
         let host = DeviceClient.host
-        guard !host.isEmpty else {
+        guard !host.isEmpty || SerialLink.current?.isLinked == true else {
             deviceInfoItem.title = "设备：未设置地址"
             modeItems.values.forEach { $0.state = .off }
             return
@@ -174,7 +177,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                     : info.mode == "music" ? "音乐"
                     : (info.showing == "claude" ? "Claude" : "Codex")
                 self.deviceInfoItem.title =
-                    "设备：\(info.ip) · 正在显示 \(showing) · \(sprites.joined(separator: " "))"
+                    "设备：\(info.transportID.hasPrefix("usb:") ? "USB" : info.ip) · 正在显示 \(showing) · \(sprites.joined(separator: " "))"
+                self.horizontalMirrorItem.state = info.mirrorHorizontal ? .on : .off
                 for (mode, item) in self.modeItems { item.state = mode == info.mode ? .on : .off }
             case .failure:
                 self.deviceInfoItem.title = "设备：\(host)（无法连接）"
@@ -272,6 +276,15 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             return
         }
         NSWorkspace.shared.open(url)
+    }
+
+    @objc private func toggleHorizontalMirror() {
+        DeviceClient.fetchInfo { result in
+            guard case let .success(info) = result else { return }
+            DeviceClient.setHorizontalMirror(!info.mirrorHorizontal) { error in
+                if let error { Self.toast("镜像设置失败", error.localizedDescription) }
+            }
+        }
     }
 
     @objc private func setDisplayMode(_ sender: NSMenuItem) {

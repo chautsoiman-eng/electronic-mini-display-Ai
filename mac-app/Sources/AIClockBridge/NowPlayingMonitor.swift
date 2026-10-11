@@ -63,6 +63,13 @@ final class NowPlayingMonitor {
         return _textRGB565
     }
 
+    /// Revision and bytes must be read under the same lock during track changes.
+    func serialImage(kind: String) -> (rev: Int, data: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        return kind == "cover" ? (_snapshot.artworkRev, _coverRGB565) : (textRev, _textRGB565)
+    }
+
     init() {
         loadMediaRemote()
     }
@@ -74,22 +81,26 @@ final class NowPlayingMonitor {
         }
     }
 
-    func jsonData() -> Data {
+    func jsonData(maxTextLength: Int? = nil) -> Data {
         renderTextIfNeeded()
-        let s = snapshot
         lock.lock()
+        let s = currentLocked()
         let tRev = textRev
+        let hasArtwork = !_coverRGB565.isEmpty
         lock.unlock()
+        func text(_ value: String) -> String {
+            maxTextLength.map { String(value.prefix($0)) } ?? value
+        }
         let dict: [String: Any] = [
-            "title": s.title,
-            "artist": s.artist,
-            "album": s.album,
+            "title": text(s.title),
+            "artist": text(s.artist),
+            "album": text(s.album),
             "playing": s.playing,
             "elapsed": Int(s.elapsed.rounded()),
             "duration": Int(s.duration.rounded()),
             "progress": s.duration > 0 ? max(0, min(1, s.elapsed / s.duration)) : 0,
             "artwork_rev": s.artworkRev,
-            "has_artwork": !coverRGB565.isEmpty,
+            "has_artwork": hasArtwork,
             "text_rev": tRev,
         ]
         return (try? JSONSerialization.data(withJSONObject: dict)) ?? Data("{}".utf8)

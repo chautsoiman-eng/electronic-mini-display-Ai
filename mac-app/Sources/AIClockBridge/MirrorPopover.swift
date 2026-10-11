@@ -402,6 +402,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     private var pollTimer: Timer?
     private var animTimer: Timer?
     private var sweepTimer: Timer?
+    private var spriteTransportID = ""
     private var spriteCache: [String: (rev: Int, frames: [CGImage], w: Int, h: Int)] = [:]
     private var lastInfo: DeviceInfo?
     private var fetchingSlot: String?
@@ -548,7 +549,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
                 let modeText = info.mode == "auto" ? "自动切换"
                     : info.mode == "net" ? "网速曲线"
                     : info.mode == "music" ? "音乐播放" : "固定显示"
-                self.statusLabel.stringValue = "\(info.ip) · \(modeText) · 数据 \(info.bridge)"
+                self.statusLabel.stringValue = "\(info.transportID.hasPrefix("usb:") ? "USB" : info.ip) · \(modeText)"
             case .failure:
                 self.mirror.deviceOK = false
                 self.mirror.needsDisplay = true
@@ -622,20 +623,27 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     }
 
     private func ensureSprite(_ info: DeviceInfo) {
+        if spriteTransportID != info.transportID {
+            spriteTransportID = info.transportID
+            spriteCache.removeAll()
+            mirror.frames = []
+        }
         let slot = info.showing == "codex" ? "codex" : "claude"
         let w = slot == "claude" ? info.claudeW : info.codexW
         let h = slot == "claude" ? info.claudeH : info.codexH
-        if let cached = spriteCache[slot], cached.rev == info.spriteRev {
+        if let cached = spriteCache[slot], cached.rev == info.spriteRev, cached.w == w, cached.h == h {
             mirror.frames = cached.frames
             mirror.spriteW = cached.w
             mirror.spriteH = cached.h
             return
         }
-        guard fetchingSlot != slot else { return }
+        guard fetchingSlot == nil else { return }
         fetchingSlot = slot
         DeviceClient.fetchSpriteRaw(slot: slot) { [weak self] result in
             guard let self = self else { return }
             self.fetchingSlot = nil
+            guard self.lastInfo?.transportID == info.transportID,
+                  self.lastInfo?.spriteRev == info.spriteRev else { return }
             if case let .success(data) = result {
                 let frames = decodeSpriteFrames(data, w: w, h: h)
                 guard !frames.isEmpty else { return }

@@ -5,6 +5,7 @@ import Foundation
 // available straight from the menu bar. Device address persists in defaults.
 
 struct DeviceInfo {
+    var transportID = ""
     var ip = ""
     var ssid = ""
     var bridge = ""
@@ -13,6 +14,7 @@ struct DeviceInfo {
     var showing = ""
     var lastUpdateS = -1    // seconds since the device last got /status data, -1 = never
     var spriteRev = 0       // bumped by the device on animation change
+    var mirrorHorizontal = false
     var brightness = 100    // backlight 0-100 (0 = off)
     var claudeCustomSprite = false
     var codexCustomSprite = false
@@ -75,8 +77,39 @@ final class DeviceClient {
         return URL(string: h.hasPrefix("http") ? h : "http://\(h)")
     }
 
+    static func parseInfo(_ data: Data) -> DeviceInfo? {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              obj["mode"] is String, obj["sprite_rev"] is Int else { return nil }
+        var info = DeviceInfo()
+        info.ip = obj["ip"] as? String ?? ""
+        info.ssid = obj["ssid"] as? String ?? ""
+        info.bridge = obj["bridge"] as? String ?? ""
+        info.mode = obj["mode"] as? String ?? "auto"
+        info.effective = obj["effective"] as? String ?? info.mode
+        info.showing = obj["showing"] as? String ?? ""
+        info.lastUpdateS = (obj["last_update_s"] as? NSNumber)?.intValue ?? -1
+        info.spriteRev = (obj["sprite_rev"] as? NSNumber)?.intValue ?? 0
+        info.mirrorHorizontal = obj["mirror_horizontal"] as? Bool ?? false
+        info.brightness = (obj["brightness"] as? NSNumber)?.intValue ?? 100
+        let claude = obj["claude"] as? [String: Any]
+        let codex = obj["codex"] as? [String: Any]
+        info.claudeCustomSprite = claude?["custom_sprite"] as? Bool ?? false
+        info.codexCustomSprite = codex?["custom_sprite"] as? Bool ?? false
+        info.claudeW = (claude?["w"] as? NSNumber)?.intValue ?? 111
+        info.claudeH = (claude?["h"] as? NSNumber)?.intValue ?? 120
+        info.codexW = (codex?["w"] as? NSNumber)?.intValue ?? 120
+        info.codexH = (codex?["h"] as? NSNumber)?.intValue ?? 120
+        info.transportID = "http:" + (baseURL?.absoluteString ?? "")
+        return info
+    }
+
     /// GET /api/info
     static func fetchInfo(completion: @escaping (Result<DeviceInfo, Error>) -> Void) {
+        if let data = SerialLink.current?.latestInfo, var info = parseInfo(data) {
+            info.transportID = "usb:" + (SerialLink.current?.sessionID.uuidString ?? "")
+            completion(.success(info))
+            return
+        }
         guard let base = baseURL else {
             completion(.failure(Self.noHostError))
             return
@@ -87,27 +120,8 @@ final class DeviceClient {
             var result: Result<DeviceInfo, Error>
             if let error = error {
                 result = .failure(error)
-            } else if let data = data,
-                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                var info = DeviceInfo()
-                info.ip = obj["ip"] as? String ?? ""
-                info.ssid = obj["ssid"] as? String ?? ""
-                info.bridge = obj["bridge"] as? String ?? ""
-                info.mode = obj["mode"] as? String ?? "auto"
-                info.effective = obj["effective"] as? String ?? info.mode
-                info.showing = obj["showing"] as? String ?? ""
-                info.lastUpdateS = (obj["last_update_s"] as? NSNumber)?.intValue ?? -1
-                info.spriteRev = (obj["sprite_rev"] as? NSNumber)?.intValue ?? 0
-                info.brightness = (obj["brightness"] as? NSNumber)?.intValue ?? 100
-                let claude = obj["claude"] as? [String: Any]
-                let codex = obj["codex"] as? [String: Any]
-                info.claudeCustomSprite = claude?["custom_sprite"] as? Bool ?? false
-                info.codexCustomSprite = codex?["custom_sprite"] as? Bool ?? false
-                info.claudeW = (claude?["w"] as? NSNumber)?.intValue ?? 111
-                info.claudeH = (claude?["h"] as? NSNumber)?.intValue ?? 120
-                info.codexW = (codex?["w"] as? NSNumber)?.intValue ?? 120
-                info.codexH = (codex?["h"] as? NSNumber)?.intValue ?? 120
-                result = .success(info)
+            } else if let data = data {
+                result = parseInfo(data).map { .success($0) } ?? .failure(Self.badResponseError)
             } else {
                 result = .failure(Self.badResponseError)
             }
@@ -119,6 +133,12 @@ final class DeviceClient {
     static func setDisplayMode(_ mode: String, completion: @escaping (Error?) -> Void) {
         wiredFirst(["display": mode], completion: completion) {
             postForm(path: "api/display", fields: ["mode": mode], completion: completion)
+        }
+    }
+
+    static func setHorizontalMirror(_ enabled: Bool, completion: @escaping (Error?) -> Void) {
+        wiredFirst(["mirror": enabled], completion: completion) {
+            postForm(path: "api/mirror", fields: ["enabled": enabled ? "1" : "0"], completion: completion)
         }
     }
 
@@ -166,6 +186,10 @@ final class DeviceClient {
     /// GET /sprite/{claude|codex}/raw — the animation the device is actually
     /// using, wire format [1 byte frame count][RGB565 big-endian frames...].
     static func fetchSpriteRaw(slot: String, completion: @escaping (Result<Data, Error>) -> Void) {
+        if let serial = SerialLink.current, serial.isLinked {
+            serial.requestSprite(slot: slot, completion: completion)
+            return
+        }
         guard let base = baseURL else {
             completion(.failure(Self.noHostError))
             return
@@ -348,6 +372,7 @@ final class DeviceClient {
     /// point it at this Mac. Called from a 60s timer; the /24 scan is
     /// rate-limited to once per 5 minutes.
     static func healPairingIfNeeded(port: UInt16) {
+        guard SerialLink.current?.isLinked != true else { return }
         guard Date().timeIntervalSince(devicePollAt) > 180 else { return } // device is polling us
         guard !healInFlight, Date().timeIntervalSince(lastHealAttempt) > 300 else { return }
         healInFlight = true

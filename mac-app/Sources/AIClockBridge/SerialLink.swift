@@ -1,183 +1,204 @@
 import Foundation
 
-// Wired (USB serial) transport to the clock, for WiFi networks with client
-// isolation - or for skipping WiFi setup entirely. Scans for CH340-style
-// serial ports, handshakes, then pushes the same payloads the device would
-// otherwise poll over HTTP, as newline-terminated frames:
-//   bridge -> device:  #HELLO   #STATUS {json}   #NET {json}   #CMD {json}
-//   device -> bridge:  #DEVICE {"name":"aiclock","fw":"x.y.z"}
-// Device log lines (anything not starting with '#') are ignored.
-//
-// NOTE: the port is opened non-exclusively so esptool/pio can still flash,
-// but quit the app before flashing to avoid the two readers fighting.
+/// Main-run-loop-owned USB transport. Nonblocking I/O, one frame per 125 ms,
+/// bounded command queue and two replaceable image transfers. No UART burst
+/// may overrun the firmware's 2 KB RX buffer during a screen redraw.
 final class SerialLink {
-    /// The running link, for DeviceClient's wired control path.
     static weak var current: SerialLink?
     private let service: StatusService
     private let netMonitor: NetSpeedMonitor
-
+    private let nowPlaying: NowPlayingMonitor
     private var fd: Int32 = -1
+    private var linked = false
     private var portPath = ""
-    private var linked = false // saw #DEVICE from the clock on this port
     private var openedAt = Date.distantPast
-    private var lastHelloAt = Date.distantPast
-    private var lastStatusAt = Date.distantPast
-    private var lastNetAt = Date.distantPast
-    private var lastTimeAt = Date.distantPast
-    private var rxBuf = Data()
+    private var lastScanAt = Date.distantPast
+    private var lastReplyAt = Date.distantPast
+    private var scanIndex = 0
     private var timer: Timer?
+    private var splitter = SerialLineSplitter()
+    private var pending = SerialPendingWrite()
+    private var due = [Date](repeating: .distantPast, count: 5)
+    private var commands: [Data] = []
+    private var bulk: [(kind: String, rev: Int, frames: [Data])] = []
+    private var info: Data?
+    private var infoAt = Date.distantPast
+    private(set) var sessionID = UUID()
+    private var assembler: SpriteAssembler?
+    private var spriteCompletion: ((Result<Data, Error>) -> Void)?
+    private var spriteDeadline = Date.distantPast
+    private var spriteCache: [String: (rev: Int, width: Int, height: Int, data: Data)] = [:]
 
-    init(service: StatusService, netMonitor: NetSpeedMonitor) {
-        self.service = service
-        self.netMonitor = netMonitor
+    init(service: StatusService, netMonitor: NetSpeedMonitor, nowPlaying: NowPlayingMonitor) {
+        self.service = service; self.netMonitor = netMonitor; self.nowPlaying = nowPlaying
     }
-
     func start() {
         SerialLink.current = self
-        // one 250ms tick drives everything: port scan, handshake, reads, pushes
-        timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
-            self?.tick()
-        }
+        let t = Timer(timeInterval: 0.125, repeats: true) { [weak self] _ in self?.tick() }
+        timer = t
+        RunLoop.main.add(t, forMode: .common)
     }
-
+    deinit { timer?.invalidate(); if fd >= 0 { close(fd) } }
     var isLinked: Bool { linked }
+    var latestInfo: Data? { linked && Date().timeIntervalSince(infoAt) < 6 ? info : nil }
 
-    /// Sends one #CMD frame if the clock is handshaken over USB. Display mode,
-    /// brightness and the web admin password then skip HTTP entirely (the
-    /// firmware applies and persists them exactly like the HTTP API).
+    /// True means queued, not acknowledged: #CMD has no ACK in this protocol.
     func trySendCommand(_ fields: [String: Any]) -> Bool {
-        guard linked, fd >= 0,
-              let json = try? JSONSerialization.data(withJSONObject: fields) else { return false }
-        send(frame("#CMD ", json))
-        return linked // send() unlinks on a write failure (unplugged)
+        guard linked, commands.count < 32, let frame = SerialProtocol.frame("CMD", fields: fields) else { return false }
+        commands.append(frame)
+        return true
     }
-
-    private func tick() {
+    func requestSprite(slot: String, completion: @escaping (Result<Data, Error>) -> Void) {
+        guard linked, let data = latestInfo, let info = DeviceClient.parseInfo(data),
+              slot == "claude" || slot == "codex" else { completion(.failure(Self.transferError)); return }
+        let w = slot == "claude" ? info.claudeW : info.codexW
+        let h = slot == "claude" ? info.claudeH : info.codexH
+        if let cached = spriteCache[slot], cached.rev == info.spriteRev, cached.width == w, cached.height == h {
+            completion(.success(cached.data)); return
+        }
+        guard spriteCompletion == nil, trySendCommand(["sprite_dump": slot]) else {
+            completion(.failure(Self.transferError)); return
+        }
+        assembler = SpriteAssembler(slot: slot, rev: info.spriteRev, width: w, height: h)
+        spriteCompletion = completion
+        spriteDeadline = Date().addingTimeInterval(60) // up to eight frames at 384 B / 60 ms
+    }
+    private static var transferError: Error {
+        NSError(domain: "SerialLink", code: 1, userInfo: [NSLocalizedDescriptionKey: "USB 传输中断、忙碌或超时，请重试"])
+    }
+    private func finishSprite(_ result: Result<Data, Error>) {
+        let callback = spriteCompletion
+        spriteCompletion = nil; assembler = nil
+        callback?(result)
+    }
+    func tick(now: Date = Date()) {
+        if spriteCompletion != nil, now > spriteDeadline { finishSprite(.failure(Self.transferError)) }
         if fd < 0 {
-            scanAndOpen()
+            if now.timeIntervalSince(lastScanAt) >= 5 { lastScanAt = now; scanAndOpen() }
             return
         }
         readPending()
-        let now = Date()
+        guard fd >= 0 else { return }
+        if linked && now.timeIntervalSince(lastReplyAt) > 12 || !linked && now.timeIntervalSince(openedAt) > 30 {
+            closePort(); return
+        }
+        if !pending.isEmpty {
+            if now.timeIntervalSince(pending.started) > 2 { closePort() } else { flushPending() }
+            return
+        }
         if !linked {
-            // handshake: #HELLO every 3s; give up on this port after 30s
-            if now.timeIntervalSince(openedAt) > 30 {
-                closePort()
-                return
-            }
-            if now.timeIntervalSince(lastHelloAt) > 3 {
-                lastHelloAt = now
-                send("#HELLO\n".data(using: .utf8)!)
-            }
+            if now >= due[0] { due[0] = now.addingTimeInterval(3); send(Data("#HELLO\n".utf8), now: now) }
             return
         }
-        if now.timeIntervalSince(lastStatusAt) > 5 {
-            lastStatusAt = now
-            send(frame("#STATUS ", service.snapshot().jsonData()))
+        // Periodic data takes priority over bulk; commands cannot starve the
+        // heartbeat. Earliest deadline gives each feed its turn after a link.
+        if let i = due.indices.filter({ due[$0] <= now }).min(by: { due[$0] < due[$1] }) {
+            let intervals: [TimeInterval] = [3, 5, 2, 60, 1]
+            due[i] = now.addingTimeInterval(intervals[i])
+            var frame: Data?
+            switch i {
+            case 0: frame = Data("#HELLO\n".utf8)
+            case 1: frame = SerialProtocol.frame("STATUS", service.snapshot().jsonData())
+            case 2:
+                let stats = SystemStatsMonitor.shared.snapshot()
+                frame = SerialProtocol.frame("NET", netMonitor.jsonData(cpu: stats.cpu, mem: stats.mem))
+            case 3: frame = SerialProtocol.frame("TIME", fields: ["epoch": Int(now.timeIntervalSince1970)])
+            default: frame = SerialProtocol.frame("MUSIC", nowPlaying.jsonData(maxTextLength: 80))
+            }
+            if let frame { send(frame, now: now) }
+            return
         }
-        if now.timeIntervalSince(lastTimeAt) > 60 {
-            // wired-only clocks have no NTP; the firmware ignores this once SNTP works
-            lastTimeAt = now
-            let epoch = Int(now.timeIntervalSince1970)
-            send(Data("#TIME {\"epoch\":\(epoch)}\n".utf8))
-        }
-        if now.timeIntervalSince(lastNetAt) > 2 {
-            lastNetAt = now
-            let stats = SystemStatsMonitor.shared.snapshot()
-            send(frame("#NET ", netMonitor.jsonData(cpu: stats.cpu, mem: stats.mem)))
+        if !commands.isEmpty { send(commands.removeFirst(), now: now); return }
+        while !bulk.isEmpty {
+            // A track change invalidates queued rows, even before the next #NEED.
+            guard nowPlaying.serialImage(kind: bulk[0].kind).rev == bulk[0].rev else { bulk.removeFirst(); continue }
+            let frame = bulk[0].frames.removeFirst()
+            if bulk[0].frames.isEmpty { bulk.removeFirst() }
+            send(frame, now: now)
+            return
         }
     }
-
-    private func frame(_ prefix: String, _ json: Data) -> Data {
-        var d = Data(prefix.utf8)
-        d.append(json) // JSONSerialization output is single-line
-        d.append(0x0A)
-        return d
+    private func handle(_ line: String) {
+        if let obj = SerialProtocol.object(line, tag: "DEVICE"), obj["name"] as? String == "aiclock" {
+            lastReplyAt = Date()
+            if !linked { linked = true; due = [Date](repeating: .distantPast, count: 5) }
+            return
+        }
+        guard linked else { return }
+        if let obj = SerialProtocol.object(line, tag: "INFO"), obj["mode"] is String, obj["sprite_rev"] is Int,
+           let data = try? JSONSerialization.data(withJSONObject: obj) {
+            info = data; infoAt = Date(); lastReplyAt = infoAt
+            let rev = obj["sprite_rev"] as? Int
+            spriteCache = spriteCache.filter { $0.value.rev == rev }
+            if let a = assembler, a.rev != rev { finishSprite(.failure(Self.transferError)) }
+        } else if let obj = SerialProtocol.object(line, tag: "NEED"), let kind = obj["k"] as? String,
+                  kind == "cover" || kind == "text", let requested = obj["rev"] as? Int, requested >= 0 {
+            let image = nowPlaying.serialImage(kind: kind)
+            guard image.rev == requested else { return } // next #MUSIC advertises current revision
+            // A repeated request must not continually restart a slow transfer.
+            if bulk.contains(where: { $0.kind == kind && $0.rev == image.rev }) { return }
+            bulk.removeAll { $0.kind == kind }
+            let frames = SerialProtocol.imageFrames(kind: kind, rev: image.rev, data: image.data)
+            if !frames.isEmpty { bulk.append((kind, image.rev, frames)) }
+        } else if line.hasPrefix("#SPR "), let a = assembler, let data = assembler?.accept(line) {
+            spriteCache[a.slot] = (a.rev, a.width, a.height, data)
+            finishSprite(.success(data))
+        }
     }
-
-    // MARK: - port lifecycle
-
     private func scanAndOpen() {
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: "/dev")) ?? []
-        let candidates = names.filter {
-            $0.hasPrefix("cu.usbserial") || $0.hasPrefix("cu.wchusbserial")
+        let names = ((try? FileManager.default.contentsOfDirectory(atPath: "/dev")) ?? []).filter {
+            $0.hasPrefix("cu.usbserial") || $0.hasPrefix("cu.wchusbserial") || $0.hasPrefix("cu.SLAB_USBtoUART")
         }.sorted()
-        for name in candidates where openPort("/dev/" + name) {
-            return
+        guard !names.isEmpty else { return }
+        for _ in names.indices {
+            let name = names[scanIndex % names.count]; scanIndex = (scanIndex + 1) % names.count
+            if openPort("/dev/" + name) { return }
         }
     }
-
-    private func openPort(_ path: String) -> Bool {
+    func openPort(_ path: String) -> Bool {
         let f = open(path, O_RDWR | O_NOCTTY | O_NONBLOCK)
         guard f >= 0 else { return false }
         var tio = termios()
-        tcgetattr(f, &tio)
+        guard tcgetattr(f, &tio) == 0 else { close(f); return false }
         cfmakeraw(&tio)
         cfsetspeed(&tio, speed_t(B115200))
         tio.c_cflag |= tcflag_t(CLOCAL | CREAD)
-        tio.c_cflag &= ~tcflag_t(HUPCL) // don't hang-up-reset the board on close
-        tcsetattr(f, TCSANOW, &tio)
-        // Deassert DTR+RTS so the CH340 auto-reset circuit lets the ESP run.
-        // TIOCMBIC = _IOW('t', 107, int); TIOCM_DTR|TIOCM_RTS = 0x006.
-        var bits: Int32 = 0x006
+        tio.c_cflag &= ~tcflag_t(HUPCL)
+        guard tcsetattr(f, TCSANOW, &tio) == 0 else { close(f); return false }
+        var bits: Int32 = 0x006 // DTR + RTS low: let the ESP run
         _ = ioctl(f, 0x8004_746B, &bits)
-        fd = f
-        portPath = path
-        linked = false
-        openedAt = Date()
-        lastHelloAt = .distantPast
-        rxBuf.removeAll()
-        FileHandle.standardError.write(Data("[serial] trying \(path)\n".utf8))
+        fd = f; portPath = path; openedAt = Date(); sessionID = UUID()
+        due = [Date](repeating: .distantPast, count: 5)
         return true
     }
-
     private func closePort() {
         if fd >= 0 { close(fd) }
-        if linked || fd >= 0 {
-            FileHandle.standardError.write(Data("[serial] closed \(portPath)\n".utf8))
-        }
-        fd = -1
-        portPath = ""
-        linked = false
+        fd = -1; linked = false; portPath = ""; info = nil; infoAt = .distantPast
+        splitter = SerialLineSplitter(); pending = SerialPendingWrite()
+        commands.removeAll(); bulk.removeAll(); spriteCache.removeAll(); sessionID = UUID()
+        finishSprite(.failure(Self.transferError))
     }
-
-    // MARK: - I/O
-
-    private func send(_ data: Data) {
-        guard fd >= 0 else { return }
+    private func send(_ data: Data, now: Date) {
+        pending.begin(data, now: now)
+        flushPending()
+    }
+    private func flushPending() {
+        let data = pending.remaining
         let n = data.withUnsafeBytes { write(fd, $0.baseAddress, data.count) }
-        if n < 0 && (errno == ENXIO || errno == EIO || errno == EBADF || errno == ENODEV) {
-            closePort() // unplugged
-        }
+        if n > 0 { pending.advance(n) }
+        else if n < 0 && errno != EAGAIN && errno != EINTR { closePort() }
     }
-
     private func readPending() {
-        var buf = [UInt8](repeating: 0, count: 4096)
-        while true {
-            let n = read(fd, &buf, buf.count)
+        var bytes = [UInt8](repeating: 0, count: 4096)
+        // Bound work per tick so noisy serial devices cannot block the UI.
+        for _ in 0..<16 {
+            let n = read(fd, &bytes, bytes.count)
             if n > 0 {
-                rxBuf.append(contentsOf: buf[0..<n])
-                if rxBuf.count > 16384 { rxBuf.removeAll() } // runaway noise
-                continue
+                for line in splitter.push(Data(bytes.prefix(n))) { handle(line) }
+            } else {
+                if n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR) { closePort() }
+                return
             }
-            if n == 0 || (n < 0 && errno != EAGAIN) { closePort() } // EOF / unplugged
-            break
-        }
-        while let nl = rxBuf.firstIndex(of: 0x0A) {
-            let lineData = rxBuf.prefix(upTo: nl)
-            rxBuf.removeSubrange(...nl)
-            guard let line = String(data: lineData, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines) else { continue }
-            if line.hasPrefix("#DEVICE") {
-                if !linked {
-                    linked = true
-                    lastStatusAt = .distantPast // push a status immediately
-                    lastNetAt = .distantPast
-                    lastTimeAt = .distantPast
-                    FileHandle.standardError.write(Data("[serial] linked \(portPath): \(line)\n".utf8))
-                }
-            }
-            // anything else is the device's debug log - ignore
         }
     }
 }

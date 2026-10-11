@@ -1,89 +1,79 @@
-<p align="center">
-  <img src="docs/images/logo.svg" width="72" alt="logo">
-</p>
+# 電子小螢幕 · Holo Dashboard
 
-<h1 align="center">AI Mac 小屏幕</h1>
+ESP8266 / SD2 + **1.54 吋 ST7789，240×240**，配合 Windows 或 macOS 橋接程式，在桌面顯示 AI、電腦狀態、時間、天氣及音樂。保留原有 Claude／Codex 桌寵、網速頁、GIF 與 WiFiManager。
 
-<p align="center">桌上的一台 AI 状态小电脑 —— ESP8266 · 开源硬件 · 桌面伴侣</p>
+本分支為 **`feature/holo-dashboard`**。軟體建置／自動測試不代表硬體驗證：**尚未收到硬體，五個頁面、USB、接線及 45° 分光鏡全部待實機驗收**。進度見 [TODO](TODO.md)，執行方式見 [驗證說明](docs/HOLO_VERIFICATION.md) 與 [實機驗收表](docs/HARDWARE_ACCEPTANCE.md)。[English](README.en.md)
 
-<p align="center">
-  中文 ·
-  <a href="README.en.md">English</a>
-</p>
+## 五個 240×240 頁面
 
-<p align="center">
-  <a href="https://mac.qust.me">官网</a> ·
-  <a href="https://mac.qust.me/#flash">网页刷机</a> ·
-  <a href="https://github.com/pengchujin/esp8266-ai/releases/latest">下载</a>
-</p>
+| 頁面／模式 | 顯示內容 | 資料來源及限制 |
+|---|---|---|
+| AI Monitor `holo_ai` | Claude／Codex 各 5 小時、7 天用量、重設倒數、工作狀態與寵物 | 本機 CLI 登入憑據與會話；未知额度顯示 `--`，不當作 0% |
+| PC Monitor `pc` | CPU／GPU 負載及溫度、RAM、CPU 歷史 | Windows 橋接；未取得感測器值時不冒充實測 |
+| Clock `clock` | 時、分、日期、星期及簡單天氣 | WiFi NTP；USB-only 用電腦 `#TIME`，NTP 成功後優先 NTP；目前韌體時區為台北 |
+| Weather `weather` | 氣溫、體感、濕度、風速、天氣狀態 | Windows Open-Meteo，預設台北；需電腦有網路；過期資料非即時 |
+| Music `music` | 封面、中文歌名／歌手、進度、24 條頻譜 | Windows WASAPI 真實 FFT；Mac 支援媒體資訊與圖片，**未實作音訊 FFT** |
 
-<p align="center">
-  <img src="docs/images/hero.jpg" width="640" alt="AI Mac 小屏幕">
-</p>
+Windows 有五頁選單及相應預覽；Mac 目前選單／鏡像支援原有桌寵、網速及音樂，**未實作 Holo／PC／Clock／Weather 的 Mac 預覽與 PC／天氣資料來源**。韌體可用裝置網頁選擇五頁。水平鏡像是裝置輸出設定，桌面鏡像是資料重繪，並非螢幕截圖。AUTO 播放／停止與 AI 待審批優先行為仍需實機驗證。
 
-一块 240×240 的复古小电视，放在桌上实时显示 **Claude Code / Codex CLI 在干什么、额度还剩多少**。不需要任何 API key：数据来自本机已有的 CLI 登录凭据和会话日志，由配套的 Mac / Windows 桥接程序在局域网内提供给设备。
+## 安裝與燒錄
 
-## 功能
+請使用本分支建置或此分支 [GitHub Actions](https://github.com/chautsoiman-eng/electronic-mini-display-Ai/actions/workflows/holo-build.yml) 成功執行的附件。上游網站／上游 Release 並不保證包含 Holo 或本次 USB 功能。
 
-| | |
-|---|---|
-| <img src="docs/images/feature1.jpg" width="360" alt="AI 工作状态"> | **AI 工作状态与额度**<br>桌宠动起来 = AI 正在干活。方形进度环 + 大字显示 5 小时 / 周额度的真实用量；额度用满自动换成重置倒计时，等你审批时整圈边框红闪提醒。 |
-| <img src="docs/images/feature2.jpg" width="360" alt="网速监视"> | **网速实时监视**<br>任务管理器风格的上下行曲线，56 秒滚动窗口，量程自动调整。 |
-| <img src="docs/images/music.jpg" width="360" alt="音乐播放"> | **音乐播放显示**<br>专辑封面、歌名、歌手、进度条实时同步；音乐响起自动切入，停止自动切回。 |
-| <img src="docs/images/feature3.jpg" width="360" alt="桌宠可换"> | **可换桌宠**<br>内置 [petdex.dev](https://petdex.dev) 画廊 3300+ 开源桌宠，也可上传任意 GIF，设备板上直接解码，无需重烧固件。 |
-
-## 快速上手
-
-需要的东西：一台「SD2 小电视」开发板（[开源硬件](https://oshwhub.com/q21182889/sd2)，也可[直接购买成品](https://mobile.yangkeduo.com/goods.html?ps=OuBjGMWE82)）、一根 USB **数据**线。
-
-### 第 1 步 · 刷固件（约 30 秒）
-
-用 Chrome / Edge 打开 **[mac.qust.me/#flash](https://mac.qust.me/#flash)**，USB 连接设备，点「连接设备并烧录」，选择串口等待完成即可，无需安装任何工具。
-
-> 弹窗里看不到串口？Windows 需要装 [CH340 驱动](https://www.wch.cn/downloads/CH341SER_EXE.html)，Mac 系统自带无需安装；换根 USB 线（很多线只能充电）；更多排查见[官网 FAQ](https://mac.qust.me/#flash-faq)。
->
-> 命令行党也可以用 esptool 把 [Releases](https://github.com/pengchujin/esp8266-ai/releases/latest) 里的 `esp8266-ai-firmware-*.bin` 刷到 `0x0`。
-
-### 第 2 步 · 配 WiFi
-
-设备首次开机会开热点 **`AI-Clock-Setup`**：手机连上后自动弹出配网页（没弹就用浏览器打开 `192.168.4.1`），选择家里 WiFi、输入密码，完成。
-
-### 第 3 步 · 装桥接程序
-
-从 [Releases](https://github.com/pengchujin/esp8266-ai/releases/latest) 下载并打开：
-
-- **macOS**：`AIClockBridge-*-macOS.dmg`，拖入 Applications（ad-hoc 签名，首次启动需在「系统设置 → 隐私与安全性」允许，并同意本地网络权限）
-- **Windows**：`AIClockBridge-*-Windows-x64.exe`，双击即用
-
-桥接程序常驻菜单栏 / 托盘，会**自动发现并配对**同一局域网内的设备——到这里屏幕就活了。
-
-<p align="center">
-  <img src="docs/images/working.jpg" width="640" alt="工作演示">
-</p>
-
-日常使用都在托盘图标上：**左键**打开设备画面的实时镜像（底部有屏幕亮度滑条），**右键**是完整菜单（额度详情、屏幕切换、更换桌宠、音乐/网速页等）。
-
-## 常见问题
-
-- **屏幕边框红色闪烁**：设备连不上桥接程序——确认电脑端程序在运行、和设备在同一 WiFi。
-- **额度一直显示 `-`**：本机没有登录过 Claude Code / Codex CLI，桥接程序读不到凭据。
-- **想换桌宠**：右键托盘图标 → 「更换桌宠动画…」，挑一个点上传就行。
-
-## 开发
-
-```
-firmware/     ESP8266 固件（PlatformIO + Arduino，含板上 GIF 解码）
-mac-app/      macOS 菜单栏桥接（Swift/SPM，零第三方依赖）
-windows-app/  Windows 托盘桥接（C# / .NET 8 WinForms）
-tools/        GIF → RGB565 内置精灵图转换脚本
-docs/         开发文档（硬件引脚、HTTP API、架构细节）
+```sh
+git clone --single-branch --branch feature/holo-dashboard https://github.com/chautsoiman-eng/electronic-mini-display-Ai.git
+cd electronic-mini-display-Ai
+python3 -m venv firmware/.pio-venv
+# Windows 可改用 py -m venv，並以 firmware/.pio-venv/Scripts/python.exe 執行下列步驟
+firmware/.pio-venv/bin/python -m pip install platformio==6.1.19
+firmware/.pio-venv/bin/python -m platformio run -d firmware -e nodemcuv2
 ```
 
-```bash
-cd firmware && pio run -t upload   # 固件：编译 + USB 烧录
-cd mac-app && swift run            # Mac 桥接：本地跑起来
+燒錄前關閉橋接程式及所有串口監視器，使用 USB **資料線**。CH340／CH341 或 CP210x 應出現為 Windows `COMx` 或 Mac `/dev/cu.usbserial*`、`/dev/cu.wchusbserial*`、`/dev/cu.SLAB_USBtoUART*`；系統未識別時才向晶片原廠取得適用驅動，不能假定每台 Mac 都免驅動。用 `python -m serial.tools.list_ports -v` 確認，再指定實際埠：
+
+```sh
+# 使用上述虛擬環境的 python；替換 PORT，勿照用 platformio.ini 的作者本機埠
+python -m platformio run -d firmware -e nodemcuv2 -t upload --upload-port PORT
 ```
 
-硬件引脚表、屏幕驱动的坑、设备 HTTP API、GIF 板上解码架构等细节见 **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)**。
+SD2 接線為 SCLK GPIO14、MOSI GPIO13、CS GPIO15、DC GPIO0、RST GPIO2、背光 GPIO5（低電位亮）。裸板／不同模組必須按 [platformio.ini](firmware/platformio.ini) 和 [硬體開發說明](docs/DEVELOPMENT.md) 核對電壓與接線後才通電。
 
-硬件、固件、软件全部开源，拿去改、拿去做、拿去卖都行。
+### macOS（macOS 12+，Swift 5.9+／Xcode Command Line Tools）
+
+```sh
+swift build --package-path mac-app -c release
+swift test --package-path mac-app
+mac-app/.build/release/AIClockBridge
+```
+
+程式常駐選單列；首次執行按系統提示允許本地網路。右鍵控制裝置與管理密碼，左鍵打開鏡像及亮度滑桿。Music 使用系統私有 MediaRemote 介面，不同 macOS／播放器可能沒有資料，必須實測；缺資料時顯示 idle。退出程式可用選單「退出」。
+
+### Windows（.NET 8 SDK 建置）
+
+```powershell
+dotnet build windows-app/AIClockBridge/AIClockBridge.csproj -c Release
+dotnet publish windows-app/AIClockBridge/AIClockBridge.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o dist/windows
+```
+
+執行 `dist/windows/AIClockBridge.exe`；亦可從本分支成功 CI 下載 `windows-portable`，解壓後執行。自包含版本不需另外安裝 .NET Runtime。允許可信私人網路上的橋接連線，音訊選用正在播放的 Windows 輸出裝置。感測器是否可讀與權限／硬體有關，不能保證每台都有 GPU 溫度。
+
+## WiFi、USB 與鏡像
+
+- **WiFi**：首次開機連 `AI-Clock-Setup`，開啟 `192.168.4.1` 配置 2.4 GHz 網路。電腦及裝置需可互通；橋接 HTTP 埠為 `8765`。自動配對失敗可在選單填裝置 IP，並在裝置網頁配置電腦的 `IP:8765`。
+- **USB-only**：接資料線，啟動橋接，等待自動掃描與 `#HELLO`／`#DEVICE` 握手（候選埠失敗最多等 30 秒後輪換）。不用先設定 WiFi 或裝置 IP。Mac 會推 `#STATUS`、`#NET`、`#TIME`、`#MUSIC`；Windows 另提供 `#PC`、`#WEATHER`／FFT。電腦仍需網路才能取得新用量或天氣。
+- **音樂圖片**：Mac／Windows 按 `#NEED` 傳送 `#IMG` 封面與文字行；115200 baud 下首次圖片逐步出現，並非即時影片。Mac 每 125 ms 最多開始一幀，定期狀態優先。快速換歌會丟棄舊版本待傳圖片。
+- **USB 精靈圖與 Mac 鏡像**：`#INFO` 提供模式及版本，`#CMD sprite_dump`／`#SPR` 回傳原始 RGB565；按連線、slot、版本及尺寸快取。首次載入可能需約 25–40 秒；60 秒未完成會失敗並容許重試，斷線清除快取。GIF 上傳／重設仍使用 WiFi HTTP，USB 回傳不等於支援 USB 上傳。
+- **切換／斷線**：有線已連接時，控制優先 USB。Mac 超過 12 秒無裝置回覆會關閉並重掃；新連線重新握手。韌體約 15 秒無 serial frame 才離開 wired-active，WiFi 能否恢復依可達性而定。USB 拔線會同時斷電的板子需要合適的獨立供電才可測不中斷 failover。
+- **水平鏡像**：Windows 選單、Mac「水平鏡像（45° 分光鏡）」或裝置網頁設定；USB 指令為 `#CMD {"mirror":true}`。套用於韌體全畫面且會保存。用非對稱文字／箭頭實測反射方向；1.54 吋不保證任何特定鏡片尺寸完全不裁切。
+
+## 管理密碼與安全
+
+裝置管理密碼預設空白。設定後，修改裝置的 HTTP API 使用 Basic Auth，使用者名稱 `admin`；橋接選單可儲存／設定密碼。**HTTP 沒有 TLS，Basic Auth 不提供傳輸加密**；只在可信局域網使用，不要把裝置或 `8765` 埠公開到網際網路。唯讀狀態仍可能包含使用資訊；Mac 密碼保存在 UserDefaults、裝置保存在 LittleFS，並非安全憑據保管庫。
+
+忘記密碼：以 USB 實體連線握手後，在管理密碼選單設新密碼或清空；也可關閉橋接後用 115200 baud 工具送 `#HELLO` 再送 `#CMD {"admin_password":""}`（每行換行）。USB 以實體存取作授權，不需舊密碼。請在驗收表記錄复原測試，勿記錄真實密碼。橋接 `/event` 僅接受本機 loopback，請勿繞過此限制。不要提交 CLI token、登入資料、真實密碼或含憑據的日誌。
+
+## 開發與驗證
+
+`firmware/` 為 PlatformIO 韌體，`mac-app/` 為 Swift 選單列程式，`windows-app/` 為 .NET 8 WinForms，`docs/` 保存協定與驗收說明。只在 `feature/holo-dashboard` 開發；不要修改或合併 `main`。
+
+完整重現指令、CI 與限制見 [HOLO_VERIFICATION](docs/HOLO_VERIFICATION.md)。硬體到手後逐項填 [HARDWARE_ACCEPTANCE](docs/HARDWARE_ACCEPTANCE.md)，只有完成實測且有證據才能標為 PASS。

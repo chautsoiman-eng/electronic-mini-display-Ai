@@ -1,89 +1,67 @@
-<p align="center">
-  <img src="docs/images/logo.svg" width="72" alt="logo">
-</p>
+# Electronic Mini Display · Holo Dashboard
 
-<h1 align="center">AI Mac Mini Display</h1>
+ESP8266 / SD2 with a **1.54-inch ST7789, 240×240** display and a Windows or macOS bridge. Work stays on **`feature/holo-dashboard`**; do not modify or merge `main`. Hardware has **not** been received or validated. Build/test success is not physical acceptance. [中文](README.md) · [Verification](docs/HOLO_VERIFICATION.md) · [Hardware checklist](docs/HARDWARE_ACCEPTANCE.md)
 
-<p align="center">A tiny AI status computer for your desk — ESP8266 · Open Source Hardware · Desktop Companion</p>
+## Screens and platform support
 
-<p align="center">
-  <a href="README.md">中文</a> ·
-  English
-</p>
+| Firmware screen | Contents | Data source / limitation |
+|---|---|---|
+| AI Monitor (`holo_ai`) | Claude/Codex 5-hour and 7-day usage, reset countdowns, activity, pets | Local CLI credentials and sessions; unavailable quota stays `--` |
+| PC Monitor (`pc`) | CPU/GPU load and temperature, RAM, CPU history | Windows bridge; unavailable sensors stay unknown |
+| Clock (`clock`) | Time, weekday, date, weather footer | WiFi NTP or USB `#TIME`; NTP takes priority once available; firmware currently uses Taipei timezone |
+| Weather (`weather`) | Temperature, feels-like, humidity, wind, conditions | Windows Open-Meteo source, Taipei by default; computer needs internet |
+| Music (`music`) | Artwork, rendered title/artist, progress, 24 spectrum bars | Windows has WASAPI FFT; Mac has metadata/artwork but **no FFT implementation** |
 
-<p align="center">
-  <a href="https://mac.qust.me">Website</a> ·
-  <a href="https://mac.qust.me/#flash">Web Flasher</a> ·
-  <a href="https://github.com/pengchujin/esp8266-ai/releases/latest">Download</a>
-</p>
+Windows provides the five page controls/previews. Mac currently previews the original pets, network and music pages; it has no Holo/PC/Clock/Weather preview or PC/weather provider. The firmware web page can select all five modes. Desktop mirrors redraw data; they are not device screenshots. GIF upload/reset still requires HTTP/WiFi.
 
-<p align="center">
-  <img src="docs/images/hero.jpg" width="640" alt="AI Mac Mini Display">
-</p>
+## Build and install this branch
 
-A retro mini-TV with a 240×240 screen that sits on your desk showing **what Claude Code / Codex CLI are doing right now and how much quota you have left**. No API key needed: everything comes from the CLI credentials and session logs already on your machine, served to the device over your LAN by the companion Mac / Windows bridge app.
+Use this branch's source or successful [GitHub Actions artifacts](https://github.com/chautsoiman-eng/electronic-mini-display-Ai/actions/workflows/holo-build.yml), not an upstream web flasher/release that may lack these changes.
 
-## Features
-
-| | |
-|---|---|
-| <img src="docs/images/feature1.jpg" width="360" alt="AI status"> | **AI status & quota**<br>Pet is walking = the AI is working. A square progress ring plus large digits show your real 5-hour / weekly quota usage; when a window is used up the pet becomes a reset countdown, and the border flashes red when the AI is waiting for your approval. |
-| <img src="docs/images/feature2.jpg" width="360" alt="Network monitor"> | **Live network monitor**<br>Task-manager-style upload/download curves, 56-second rolling window, auto-scaling axis. |
-| <img src="docs/images/music.jpg" width="360" alt="Now playing"> | **Now playing**<br>Album art, title, artist and progress bar in real time; switches in automatically when music starts, back when it stops. |
-| <img src="docs/images/feature3.jpg" width="360" alt="Swappable pets"> | **Swappable pets**<br>Built-in [petdex.dev](https://petdex.dev) gallery with 3300+ open-source pets, or upload any GIF — decoded on the board itself, no reflashing needed. |
-
-## Getting started
-
-What you need: an "SD2 mini-TV" dev board ([open-source hardware](https://oshwhub.com/q21182889/sd2), or [buy one assembled](https://mobile.yangkeduo.com/goods.html?ps=OuBjGMWE82)) and a USB **data** cable.
-
-### Step 1 · Flash the firmware (~30 s)
-
-Open **[mac.qust.me/#flash](https://mac.qust.me/#flash)** in Chrome / Edge, plug the device in over USB, click "Connect & Flash", pick the serial port and wait. No tools to install.
-
-> Serial port not showing up? On Windows install the [CH340 driver](https://www.wch.cn/downloads/CH341SER_EXE.html); macOS has it built in. Try another USB cable (many are charge-only). More troubleshooting in the [website FAQ](https://mac.qust.me/#flash-faq).
->
-> Command-line folks can also flash `esp8266-ai-firmware-*.bin` from [Releases](https://github.com/pengchujin/esp8266-ai/releases/latest) to address `0x0` with esptool.
-
-### Step 2 · Connect WiFi
-
-On first boot the device opens a hotspot named **`AI-Clock-Setup`**: join it from your phone and the setup page pops up (or browse to `192.168.4.1`), pick your WiFi and enter the password. Done.
-
-### Step 3 · Install the bridge app
-
-Download from [Releases](https://github.com/pengchujin/esp8266-ai/releases/latest) and open:
-
-- **macOS**: `AIClockBridge-*-macOS.dmg`, drag into Applications (ad-hoc signed; on first launch allow it in "System Settings → Privacy & Security" and grant local-network access)
-- **Windows**: `AIClockBridge-*-Windows-x64.exe`, just double-click
-
-The bridge lives in your menu bar / tray and **auto-discovers and pairs** with the device on the same LAN — at this point the screen comes alive.
-
-<p align="center">
-  <img src="docs/images/working.jpg" width="640" alt="In action">
-</p>
-
-Daily use is all on the tray icon: **left-click** opens a live mirror of the device screen (with a brightness slider at the bottom), **right-click** opens the full menu (quota details, screen switching, pet swapping, music/network pages, and more).
-
-## FAQ
-
-- **Screen border flashing red**: the device can't reach the bridge — make sure the app is running and on the same WiFi.
-- **Quota shows `-` forever**: no Claude Code / Codex CLI login on this machine, so the bridge has no credentials to read.
-- **Want a different pet**: right-click the tray icon → "Change pet animation…", pick one and upload.
-
-## Development
-
-```
-firmware/     ESP8266 firmware (PlatformIO + Arduino, with on-board GIF decoding)
-mac-app/      macOS menu bar bridge (Swift/SPM, zero third-party dependencies)
-windows-app/  Windows tray bridge (C# / .NET 8 WinForms)
-tools/        GIF → RGB565 built-in sprite conversion script
-docs/         Developer docs (pinout, HTTP API, architecture details)
+```sh
+git clone --single-branch --branch feature/holo-dashboard https://github.com/chautsoiman-eng/electronic-mini-display-Ai.git
+cd electronic-mini-display-Ai
+python3 -m venv firmware/.pio-venv
+firmware/.pio-venv/bin/python -m pip install platformio==6.1.19
+firmware/.pio-venv/bin/python -m platformio run -d firmware -e nodemcuv2
 ```
 
-```bash
-cd firmware && pio run -t upload   # firmware: build + flash over USB
-cd mac-app && swift run            # Mac bridge: run locally
+On Windows use `py -m venv` and `firmware/.pio-venv/Scripts/python.exe`. Stop the bridge and serial monitors before flashing. With that environment's Python, run `python -m serial.tools.list_ports -v`, then `python -m platformio run -d firmware -e nodemcuv2 -t upload --upload-port PORT`, replacing PORT with your actual port. Do not reuse the author's fixed port in platformio.ini.
+
+Use a USB **data** cable. CH340/CH341 and CP210x may require a suitable vendor driver. Mac candidates include `/dev/cu.usbserial*`, `/dev/cu.wchusbserial*`, `/dev/cu.SLAB_USBtoUART*`; Windows uses `COMx`. Check your board's voltage and wiring against [platformio.ini](firmware/platformio.ini) and [development notes](docs/DEVELOPMENT.md) before powering bare modules.
+
+**macOS 12+, Swift 5.9+ / Command Line Tools:**
+
+```sh
+swift build --package-path mac-app -c release
+swift test --package-path mac-app
+mac-app/.build/release/AIClockBridge
 ```
 
-Hardware pinout, display-driver gotchas, the device HTTP API and the on-board GIF decoding architecture are documented in **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)** (Chinese).
+Full Xcode is needed if the installed Command Line Tools do not include XCTest. Allow local-network access when prompted. Right-click the menu-bar icon for controls/password; left-click for mirror/brightness. Music uses private MediaRemote APIs: support varies by macOS and player and requires testing.
 
-Hardware, firmware and software are all open source — modify it, build it, even sell it.
+**Windows / .NET 8 SDK:**
+
+```powershell
+dotnet build windows-app/AIClockBridge/AIClockBridge.csproj -c Release
+dotnet publish windows-app/AIClockBridge/AIClockBridge.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o dist/windows
+```
+
+Run `dist/windows/AIClockBridge.exe`, or download and extract the branch CI's `windows-portable` artifact. The self-contained build needs no separately installed .NET runtime. Sensor availability depends on hardware/permissions.
+
+## Connections and mirroring
+
+- **WiFi:** join `AI-Clock-Setup`, open `192.168.4.1`, configure 2.4 GHz WiFi. Device and computer must be reachable. Bridge port is `8765`; enter the device IP and computer `IP:8765` manually if automatic pairing fails.
+- **USB-only:** no device IP or WiFi setup is needed. The bridge scans and handshakes automatically. Mac sends status, network, time and music; Windows additionally sends PC/weather and FFT. Internet on the computer is still needed for fresh remote quota/weather.
+- **Artwork/text:** device `#NEED` requests trigger RGB565 `#IMG` row frames. At 115200 baud, images arrive progressively. Mac starts at most one frame per 125 ms, retains partial writes, and drops queued obsolete revisions.
+- **Sprites:** `#INFO` supplies device state; `#CMD sprite_dump` requests `#SPR` chunks. Cache keys include connection, slot, revision and dimensions. Allow roughly 25–40 seconds for initial loading, with a 60-second deadline. Disconnect clears incomplete transfers/cache. USB download is not USB GIF upload.
+- **Recovery:** Mac reconnects after 12 seconds without device replies. Firmware leaves wired-active about 15 seconds after the last serial frame. Test WiFi fallback with independent safe power; unplugging USB power is a reboot, not seamless failover.
+- **45° optics:** use Windows controls, Mac's horizontal-mirror menu item, or the device web page; USB command is `#CMD {"mirror":true}`. It persists on the device. Verify asymmetric text, arrows, full-image orientation, viewing angle and clipping physically.
+
+## Password and security
+
+The optional device admin password defaults to empty. HTTP mutations use Basic Auth with username `admin`. HTTP has **no TLS**; Basic Auth is not encryption. Use a trusted LAN, never expose the device or port 8765 publicly. Read-only status can still disclose usage information. Mac stores the password in UserDefaults and firmware stores it in LittleFS, not secure credential stores.
+
+To recover a forgotten password, handshake over USB and use the bridge password menu to replace/clear it. Alternatively, stop the bridge and send newline-terminated `#HELLO`, then `#CMD {"admin_password":""}` at 115200 baud. USB physical access does not require the old password. Verify persistence and HTTP behavior afterward. Bridge `/event` accepts loopback only. Never commit tokens, login files, passwords or sensitive logs.
+
+See [verification commands](docs/HOLO_VERIFICATION.md), [TODO](TODO.md), and the executable [hardware acceptance checklist](docs/HARDWARE_ACCEPTANCE.md), which includes expected results and failure records. Every hardware item currently remains NOT RUN.
