@@ -12,9 +12,9 @@
 ## 自動驗證
 - [x] 本機 macOS Swift Release build。
 - [x] 本機 PlatformIO 6.1.19 `nodemcuv2` build。
-- [ ] 本機 Swift tests：已嘗試，Command Line Tools 缺 XCTest；交 CI 完整 Xcode 執行。
-- [ ] 本機 Windows .NET tests：已嘗試 Serial.Tests，macOS sandbox 的 GetDomainName 呼叫受限；WinForms 套件需 Windows，交 CI 執行。
-- GitHub Actions 的完整結果以本次提交對應的 workflow 為準，見 [驗證說明](docs/HOLO_VERIFICATION.md)。環境受限項不等於測試通過。
+- [x] macOS CI Swift Release build／11 項 tests 全通過，含 pseudo-terminal（未跳過）。本機 `swift test` 因 Command Line Tools 缺 XCTest 無法執行。
+- [x] Windows CI Release build、六組 .NET 測試、NuGet 漏洞檢查及 portable 發佈通過。本機 Serial.Tests 受 macOS sandbox `GetDomainName` 限制。
+- [x] 實作提交 `56f7688` 的 [GitHub Actions #38128556088](https://github.com/chautsoiman-eng/electronic-mini-display-Ai/actions/runs/38128556088) 三個 jobs 全通過。後續提交僅記錄驗證結果；環境受限項及實機未測仍另列。
 
 ## 原有 Windows／韌體功能（程式已實作，待實機）
 - [x] Windows CH340/CP210x 掃描與 `#STATUS/#NET/#PC/#WEATHER/#TIME`。

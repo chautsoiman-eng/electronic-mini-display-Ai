@@ -12,6 +12,18 @@
 
 GitHub Actions：[Holo build and render checks](https://github.com/chautsoiman-eng/electronic-mini-display-Ai/actions/workflows/holo-build.yml)。推送此分支自動啟動，應核對 run 的 commit SHA 與待測檔案，不沿用舊提交綠燈。
 
+## 本次 GitHub Actions 實際結果
+
+實作提交 [`56f7688`](https://github.com/chautsoiman-eng/electronic-mini-display-Ai/commit/56f7688b8863a41d21b6ce88a340dbdc60e1aea2)：[run 38128556088](https://github.com/chautsoiman-eng/electronic-mini-display-Ai/actions/runs/38128556088) **SUCCESS**（2026-10-11）。本節與 TODO 的後續提交只補充此結果，未變更實作。
+
+| Job | 結果 |
+|---|---|
+| mac | Swift Release build成功；11項XCTest、0失敗、0跳過；含6項新SerialProtocol測試與實際pseudo-terminal整合測試 |
+| windows | Release build；HoloAi、PcMonitor、Clock、Dashboard、Petdex、Serial六組測試；NuGet直接／間接漏洞檢查；portable publish全部成功 |
+| firmware | nodemcuv2建置成功，firmware.bin附件已上傳 |
+
+這些測試沒有連接實體USB晶片、ST7789或分光鏡，也未驗證真實播放器、感測器、WiFi failover及24小時穩定性。硬體項目繼續保持NOT RUN。
+
 ## 重現指令（repo 根目錄）
 
 macOS（完整 Xcode 提供 XCTest）：
